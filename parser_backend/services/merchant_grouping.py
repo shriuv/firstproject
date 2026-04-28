@@ -231,37 +231,33 @@ def run_merchant_grouping(document_id: int, user_id: str) -> None:
         _finish(sb, document_id, txns, user_id)
         return
     # ── 4. Collect Embeddings ──────────────────────────────────────────────────
+    import time
     all_clean = [t["clean_string"] for t in embed_txns]
     embeddings = []
     for i in range(0, len(all_clean), EMBED_BATCH_SIZE):
         embeddings.extend(_embed_batch(all_clean[i:i+EMBED_BATCH_SIZE]))
 
-    # Bulk update embeddings
-    bulk_emb_updates = []
+    # Update embeddings one by one with a tiny delay to avoid 429 and identity column issues
+    logger.info("Updating %d embeddings...", len(embeddings))
     for txn, emb in zip(embed_txns, embeddings):
         if emb:
             txn["embedding"] = emb
-            bulk_emb_updates.append({
-                "uncategorized_transaction_id": txn["uncategorized_transaction_id"],
-                "embedding": emb,
+            sb.table("uncategorized_transactions").update({
+                "embedding": emb, 
                 "clean_merchant_name": txn["clean_string"]
-            })
-    
-    if bulk_emb_updates:
-        logger.info("Bulk updating %d embeddings...", len(bulk_emb_updates))
-        sb.table("uncategorized_transactions").upsert(bulk_emb_updates).execute()
+            }).eq("uncategorized_transaction_id", txn["uncategorized_transaction_id"]).execute()
+            time.sleep(0.05) # Tiny sleep to prevent rate-limiting
 
     # ── 5. Perform Grouping ────────────────────────────────────────────────────
     embedded = [t for t in embed_txns if t.get("embedding")]
     if embedded:
         embedded = _group_within_batch(embedded)
-        bulk_group_updates = [
-            {"uncategorized_transaction_id": t["uncategorized_transaction_id"], "group_id": t["group_id"]}
-            for t in embedded
-        ]
-        if bulk_group_updates:
-            logger.info("Bulk updating %d group IDs...", len(bulk_group_updates))
-            sb.table("uncategorized_transactions").upsert(bulk_group_updates).execute()
+        logger.info("Updating %d group IDs...", len(embedded))
+        for t in embedded:
+            sb.table("uncategorized_transactions").update({
+                "group_id": t["group_id"]
+            }).eq("uncategorized_transaction_id", t["uncategorized_transaction_id"]).execute()
+            time.sleep(0.05)
     
     _finish(sb, document_id, txns, user_id)
 
