@@ -193,27 +193,46 @@ async function runAutoPipeline(req, res) {
     }
 
     if (resolvedRows.length > 0) {
-      const insertRows = resolvedRows.map(({ txn, result }) => ({
-        user_id, document_id, transaction_date: txn.txn_date, details: txn.details,
-        amount: txn.debit || txn.credit || 0, transaction_type: txn.debit ? 'DEBIT' : 'CREDIT',
-        offset_account_id: result.offset_account_id, categorised_by: result.categorised_by,
-        confidence_score: result.confidence_score, attention_level: result.attention_level,
-        uncategorized_transaction_id: txn.uncategorized_transaction_id, review_status: 'PENDING'
-      }));
-      
-      const { error: insertErr } = await supabase.from('transactions').insert(insertRows);
-      
-      if (!insertErr) {
-        // Mark as categorized in the source table so they disappear from the "Pending" UI
-        const ids = resolvedRows.map(r => r.txn.uncategorized_transaction_id);
-        await supabase
-          .from('uncategorized_transactions')
-          .update({ grouping_status: 'categorized' })
-          .in('uncategorized_transaction_id', ids);
-        
-        logger.info('[AUTO-PIPELINE] Batch insert OK and source table updated', { count: ids.length });
+      const insertRows = resolvedRows.map(({ txn, result }) => {
+        // Ensure we have a base account ID (the bank account)
+        if (!txn.account_id) {
+          logger.warn('[AUTO-PIPELINE] Skipping row — missing account_id', { txnId: txn.uncategorized_transaction_id });
+          return null;
+        }
+
+        return {
+          user_id,
+          document_id,
+          base_account_id: txn.account_id,
+          transaction_date: txn.txn_date,
+          details: txn.details,
+          amount: txn.debit || txn.credit || 0,
+          transaction_type: txn.debit ? 'DEBIT' : 'CREDIT',
+          offset_account_id: result.offset_account_id,
+          categorised_by: result.categorised_by,
+          confidence_score: result.confidence_score,
+          attention_level: result.attention_level,
+          uncategorized_transaction_id: txn.uncategorized_transaction_id,
+          review_status: 'PENDING'
+        };
+      }).filter(Boolean);
+
+      if (insertRows.length === 0) {
+        logger.warn('[AUTO-PIPELINE] No valid rows to insert after account_id check');
       } else {
-        logger.error('[AUTO-PIPELINE] Batch insert failed', { error: insertErr.message });
+        const { error: insertErr } = await supabase.from('transactions').insert(insertRows);
+        
+        if (!insertErr) {
+          const ids = insertRows.map(r => r.uncategorized_transaction_id);
+          await supabase
+            .from('uncategorized_transactions')
+            .update({ grouping_status: 'categorized' })
+            .in('uncategorized_transaction_id', ids);
+          
+          logger.info('[AUTO-PIPELINE] Batch insert OK', { count: ids.length });
+        } else {
+          logger.error('[AUTO-PIPELINE] Batch insert failed', { error: insertErr.message });
+        }
       }
     }
 
