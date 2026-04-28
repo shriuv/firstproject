@@ -200,7 +200,21 @@ async function runAutoPipeline(req, res) {
         confidence_score: result.confidence_score, attention_level: result.attention_level,
         uncategorized_transaction_id: txn.uncategorized_transaction_id, review_status: 'PENDING'
       }));
-      await supabase.from('transactions').insert(insertRows);
+      
+      const { error: insertErr } = await supabase.from('transactions').insert(insertRows);
+      
+      if (!insertErr) {
+        // Mark as categorized in the source table so they disappear from the "Pending" UI
+        const ids = resolvedRows.map(r => r.txn.uncategorized_transaction_id);
+        await supabase
+          .from('uncategorized_transactions')
+          .update({ grouping_status: 'categorized' })
+          .in('uncategorized_transaction_id', ids);
+        
+        logger.info('[AUTO-PIPELINE] Batch insert OK and source table updated', { count: ids.length });
+      } else {
+        logger.error('[AUTO-PIPELINE] Batch insert failed', { error: insertErr.message });
+      }
     }
 
     if (llmLeftovers.length > 0) {
