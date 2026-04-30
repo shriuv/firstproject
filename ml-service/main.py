@@ -113,16 +113,32 @@ async def get_embed(payload: TextRequest, request: Request):
 
 @app.post("/embed/batch")
 async def get_embed_batch(payload: BatchTextRequest, request: Request):
-    results = []
+    if not payload.texts:
+        return {"results": []}
+        
     anchors = set(payload.anchors) if payload.anchors else set()
-    for text in payload.texts:
-        distilled = nlp_pipeline.distill(text, batch_context=payload.texts, anchors=anchors)
-        vec = request.app.state.embedder.encode(distilled)
-        results.append({
-            "original": text, "distilled": distilled,
-            "embedding": [float(v) for v in vec.tolist()]
-        })
-    return {"results": results}
+    
+    # 1. Distill all texts first
+    distilled_texts = [
+        nlp_pipeline.distill(text, batch_context=payload.texts, anchors=anchors)
+        for text in payload.texts
+    ]
+    
+    # 2. Vectorized batch encoding (much more efficient)
+    try:
+        vectors = request.app.state.embedder.encode(distilled_texts)
+        # Convert to list of floats for JSON
+        results = []
+        for i, text in enumerate(payload.texts):
+            results.append({
+                "original": text,
+                "distilled": distilled_texts[i],
+                "embedding": [float(v) for v in vectors[i].tolist()]
+            })
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Batch encoding error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=False)

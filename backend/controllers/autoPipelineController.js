@@ -63,19 +63,19 @@ async function getAccountIdFromTemplate(templateId, userId) {
     .maybeSingle();
 
   const fallbackNames = {
-    14:  'Healthcare & Medical',
-    30:  'Education',
-    35:  'Housing & Rent',
-    36:  'Food & Dining',
-    37:  'Travel & Transport',
-    38:  'Shopping & Clothing',
-    39:  'Mobile & Utilities',
-    40:  'Mobile & Utilities',
-    41:  'Insurance',
-    43:  'Investment & Savings',
-    45:  'Entertainment & Leisure',
-    52:  'Gifts & Donations',
-    97:  'Personal Care',
+    14: 'Healthcare & Medical',
+    30: 'Education',
+    35: 'Housing & Rent',
+    36: 'Food & Dining',
+    37: 'Travel & Transport',
+    38: 'Shopping & Clothing',
+    39: 'Mobile & Utilities',
+    40: 'Mobile & Utilities',
+    41: 'Insurance',
+    43: 'Investment & Savings',
+    45: 'Entertainment & Leisure',
+    52: 'Gifts & Donations',
+    97: 'Personal Care',
     113: 'Advertising & Marketing',
     116: 'Subscriptions & Memberships',
     121: 'Bank Charges & Fees',
@@ -100,7 +100,7 @@ async function getAccountIdFromTemplate(templateId, userId) {
   };
 
   const accountName = (tData && tData.account_name) ? tData.account_name : fallbackNames[templateId];
-  
+
   if (tData && tData.account_name) {
     console.debug(`📌 getAccountIdFromTemplate: Found name "${accountName}" in DB for template ${templateId}`);
   } else if (fallbackNames[templateId]) {
@@ -147,12 +147,19 @@ async function runAutoPipeline(req, res) {
   let pipelineError = null;
   try {
     // 1. Fetch pending transactions
-    const { data: existingTxns } = await supabase.from('transactions').select('uncategorized_transaction_id').eq('document_id', document_id);
-    const existingIds = (existingTxns || []).map(r => r.uncategorized_transaction_id);
+    const { data: existingTxns } = await supabase
+      .from('transactions')
+      .select('uncategorized_transaction_id')
+      .eq('document_id', document_id);
+
+    // Filter out nulls to prevent 'IN (..., null, ...)' query issues in Postgres
+    const existingIds = (existingTxns || [])
+      .map(r => r.uncategorized_transaction_id)
+      .filter(id => id !== null);
 
     let uncatQuery = supabase.from('uncategorized_transactions').select('*').eq('document_id', document_id).eq('user_id', user_id);
     if (existingIds.length > 0) uncatQuery = uncatQuery.not('uncategorized_transaction_id', 'in', `(${existingIds.join(',')})`);
-    
+
     const { data: uncatRows } = await uncatQuery.in('grouping_status', ['done', 'pipeline_running']);
     const pending = uncatRows || [];
     if (pending.length === 0) return res.json({ resolved: 0, llm_pending: 0, document_id });
@@ -185,21 +192,18 @@ async function runAutoPipeline(req, res) {
       .filter(r => r.offset_account_id); // safety: must have destination
 
     if (contraRows.length > 0) {
-      const { error: contraInsertErr } = await supabase.from('transactions').insert(contraRows);
-      if (contraInsertErr) {
-        if (contraInsertErr.code === '23505') {
-          // Rows already written by a previous run — safe to skip on retry
-          logger.warn('[AUTO-PIPELINE] Contra rows already exist (retry), skipping duplicate insert');
-        } else {
-          logger.error('[AUTO-PIPELINE] Contra insert failed', { error: contraInsertErr.message });
-        }
-      } else {
-        logger.info('[AUTO-PIPELINE] Contra rows inserted', { count: contraRows.length });
-        const contraUncatIds = contraRows.map(r => r.uncategorized_transaction_id).filter(Boolean);
-        if (contraUncatIds.length > 0) {
-          await supabase.from('uncategorized_transactions')
-            .update({ grouping_status: 'categorized' })
-            .in('uncategorized_transaction_id', contraUncatIds);
+      // Individual inserts for Contra to handle identity column and duplicates
+      for (const row of contraRows) {
+        try {
+          const { error: singleErr } = await supabase.from('transactions').insert(row);
+          if (!singleErr || singleErr.code === '23505') {
+            await supabase
+              .from('uncategorized_transactions')
+              .update({ grouping_status: 'categorized' })
+              .eq('uncategorized_transaction_id', row.uncategorized_transaction_id);
+          }
+        } catch (err) {
+          logger.error('[AUTO-PIPELINE] Contra row insert failed', { id: row.uncategorized_transaction_id, error: err.message });
         }
       }
     }
@@ -223,9 +227,9 @@ async function runAutoPipeline(req, res) {
       }
     }
 
-    const groupResultMap = new Map(); 
-    const resolvedRows = [];          
-    const llmLeftovers = [];          
+    const groupResultMap = new Map();
+    const resolvedRows = [];
+    const llmLeftovers = [];
 
     // 3. STAGE 1 & 1.5: Fast Path and Personal Exact
     const representatives = nonContraPending.filter(txn => !txn.group_id || groupRepMap.get(txn.group_id) === txn.uncategorized_transaction_id);
@@ -318,37 +322,51 @@ async function runAutoPipeline(req, res) {
       if (insertRows.length === 0) {
         logger.warn('[AUTO-PIPELINE] No valid rows to insert after account_id check');
       } else {
-        const { error: insertErr } = await supabase.from('transactions').insert(insertRows);
-        
-        if (!insertErr) {
-          const ids = insertRows.map(r => r.uncategorized_transaction_id);
-          await supabase
-            .from('uncategorized_transactions')
-            .update({ grouping_status: 'categorized' })
-            .in('uncategorized_transaction_id', ids);
-          
-          logger.info('[AUTO-PIPELINE] Batch insert OK', { count: ids.length });
-        } else if (insertErr.code === '23505') {
-          // Rows already written by a previous (partial) run — treat as success on retry
-          logger.warn('[AUTO-PIPELINE] Batch insert skipped — rows already exist (retry idempotency)', { count: insertRows.length });
-          // Still mark them as categorized so they don't re-enter the pipeline
-          const ids = insertRows.map(r => r.uncategorized_transaction_id);
-          await supabase
-            .from('uncategorized_transactions')
-            .update({ grouping_status: 'categorized' })
-            .in('uncategorized_transaction_id', ids);
-        } else {
-          logger.error('[AUTO-PIPELINE] Batch insert failed', { error: insertErr.message });
+        logger.info('[AUTO-PIPELINE] Starting individual inserts', { total: insertRows.length });
+
+        let successCount = 0;
+        let skipCount = 0;
+        let failCount = 0;
+
+        for (const row of insertRows) {
+          try {
+            const { error: singleErr } = await supabase.from('transactions').insert(row);
+
+            if (!singleErr) {
+              successCount++;
+              await supabase
+                .from('uncategorized_transactions')
+                .update({ grouping_status: 'categorized' })
+                .eq('uncategorized_transaction_id', row.uncategorized_transaction_id);
+            } else if (singleErr.code === '23505') {
+              logger.info('[AUTO-PIPELINE] Row already exists in transactions table', { id: row.uncategorized_transaction_id });
+              await supabase
+                .from('uncategorized_transactions')
+                .update({ grouping_status: 'categorized' })
+                .eq('uncategorized_transaction_id', row.uncategorized_transaction_id);
+              skipCount++;
+            } else {
+              logger.error('[AUTO-PIPELINE] Row insert failed', { id: row.uncategorized_transaction_id, error: singleErr.message, code: singleErr.code });
+              failCount++;
+            }
+          } catch (rowErr) {
+            logger.error('[AUTO-PIPELINE] Unexpected error on row insert', { id: row.uncategorized_transaction_id, error: rowErr.message });
+            failCount++;
+          }
         }
+
+        logger.info('[AUTO-PIPELINE] Pipeline sync complete', {
+          total: insertRows.length,
+          success: successCount,
+          already_exists: skipCount,
+          failed: failCount
+        });
       }
     }
 
     if (llmLeftovers.length > 0) {
       const queueRows = llmLeftovers.map(id => ({ uncategorized_transaction_id: id, user_id, document_id, status: 'pending' }));
-      const { error: llmInsertErr } = await supabase.from('llm_queue').insert(queueRows);
-      if (llmInsertErr && llmInsertErr.code !== '23505') {
-        logger.error('[AUTO-PIPELINE] LLM queue insert failed', { error: llmInsertErr.message });
-      }
+      await supabase.from('llm_queue').insert(queueRows);
     }
 
     res.json({ resolved: resolvedRows.length, llm_pending: llmLeftovers.length, document_id });

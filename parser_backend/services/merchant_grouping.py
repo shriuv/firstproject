@@ -1,15 +1,9 @@
-"""
-services/merchant_grouping.py
-─────────────────────────────
-Pre-pipeline background grouping job (Universal Scrubber v19).
-"""
-from __future__ import annotations
-
 import os
 import re
 import uuid
 import math
 import logging
+import time
 import httpx
 
 from db.connection import get_client
@@ -18,7 +12,7 @@ logger = logging.getLogger("ledgerai.ledger_merchants")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 COSINE_THRESHOLD_GROUP  = 0.92
-EMBED_BATCH_SIZE   = 10
+EMBED_BATCH_SIZE   = 50  # Increased batch size for the ML service
 
 # ==============================================================================
 # UNIVERSAL SIGNAL REGISTRY v19 (Omni-Note / Tail Rescue)
@@ -116,15 +110,11 @@ def _derive_clean_string_no_rule(details: str) -> str:
         primary_segments.append(w)
 
     # 3. Identity Synthesis (Omni-Note Restoration)
-    # We take the first 1-2 words (Merchant) AND the final word (Purpose Note)
     if not primary_segments:
         final = secondary_segments
     else:
-        # Identity Kernel = First 2 segments
         identity = primary_segments[:2]
-        # Purpose Note = THE LAST segment in the primary chain
         note = primary_segments[-1]
-        
         if note not in identity:
             identity.append(note)
         final = identity
@@ -136,7 +126,6 @@ def _derive_clean_string_no_rule(details: str) -> str:
             if len("".join([c for c in best if c.isalpha()])) >= 3: return best
         return "UNKNOWN"
 
-    # Narrative Kernel: Capped to 3 words [First] [Second] [Last]
     return " ".join(final[:3]).strip()
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -146,31 +135,33 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     if mag_a == 0 or mag_b == 0: return 0.0
     return dot / (mag_a * mag_b)
 
-def _is_person_name(clean_string: str) -> bool:
-    s = clean_string.strip().upper()
-    if any(kw in s for kw in MERCHANT_ANCHORS): return False
-    words = s.split()
-    if len(words) >= 2: return True
-    if re.match(r'^[A-Z]{4,25}$', s): return True
-    return False
-
 def _get_ml_service_url() -> str:
     url = os.environ.get("ML_SERVICE_URL", "").strip()
     if not url: return f"http://127.0.0.1:{os.environ.get('PYTHON_PORT', '5000')}"
     return url
 
-def _embed_batch(clean_strings: list[str]) -> list[list[float] | None]:
+def _embed_batch(client: httpx.Client, clean_strings: list[str]) -> list[list[float] | None]:
+    """Uses the ML service's batch endpoint for efficiency."""
     ml_url = _get_ml_service_url()
-    embed_endpoint = f"{ml_url}/embed"
-    results: list[list[float] | None] = []
-    for text in clean_strings:
-        try:
-            resp = httpx.post(embed_endpoint, json={"text": text.upper()}, timeout=30.0, follow_redirects=True)
-            resp.raise_for_status()
-            embedding = resp.json().get("embedding")
-            results.append(embedding if isinstance(embedding, list) else None)
-        except: results.append(None)
-    return results
+    endpoint = f"{ml_url}/embed/batch"
+    try:
+        resp = client.post(endpoint, json={"texts": clean_strings}, timeout=60.0)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        return [r.get("embedding") for r in results]
+    except Exception as e:
+        logger.error("Batch embedding failed: %s", e)
+        # Fallback to individual calls if batch fails for some reason
+        fallback = []
+        individual_endpoint = f"{ml_url}/embed"
+        for text in clean_strings:
+            try:
+                r = client.post(individual_endpoint, json={"text": text.upper()}, timeout=30.0)
+                r.raise_for_status()
+                fallback.append(r.json().get("embedding"))
+            except:
+                fallback.append(None)
+        return fallback
 
 def _classify_transactions(txns: list[dict], routing_rules: list[dict]) -> list[dict]:
     for txn in txns:
@@ -198,10 +189,17 @@ def _group_within_batch(embed_txns: list[dict]) -> list[dict]:
         if rx != ry:
             if embed_txns[rx]["uncategorized_transaction_id"] <= embed_txns[ry]["uncategorized_transaction_id"]: parent[ry] = rx
             else: parent[rx] = ry
+    
+    # Pre-calculate embeddings for speed
+    embs = [t.get("embedding") for t in embed_txns]
+    
     for i in range(n):
+        if not embs[i]: continue
         for j in range(i + 1, n):
-            emb_i, emb_j = embed_txns[i].get("embedding"), embed_txns[j].get("embedding")
-            if emb_i and emb_j and _cosine_similarity(emb_i, emb_j) >= COSINE_THRESHOLD_GROUP: union(i, j)
+            if not embs[j]: continue
+            if _cosine_similarity(embs[i], embs[j]) >= COSINE_THRESHOLD_GROUP: 
+                union(i, j)
+                
     uuids: dict[int, str] = {}
     for i in range(n):
         root = find(i)
@@ -212,76 +210,98 @@ def _group_within_batch(embed_txns: list[dict]) -> list[dict]:
 def run_merchant_grouping(document_id: int, user_id: str) -> None:
     sb = get_client()
     logger.info("GROUPING START | document_id=%s", document_id)
+    
     txns = sb.table("uncategorized_transactions").select("*").eq("document_id", document_id).eq("user_id", user_id).execute().data or []
     if not txns:
         sb.table("documents").update({"grouping_status": "done"}).eq("document_id", document_id).execute()
         return
+
     rules = sb.table("routing_rules").select("pattern, strategy_type").execute().data or []
     txns = _classify_transactions(txns, rules)
+    
     strat_groups = {"FAST_PATH":[], "EXACT_THEN_DUMP":[], "VECTOR_SEARCH":[], "NO_RULE":[]}
     for t in txns: strat_groups[t["pre_pipeline_strategy"]].append(t)
+    
+    # Batch update strategy labels
     for strat, group in strat_groups.items():
         if not group: continue
         ids = [t["uncategorized_transaction_id"] for t in group]
         payload = {"pre_pipeline_strategy": strat}
         if strat in ("FAST_PATH", "EXACT_THEN_DUMP"): payload["grouping_status"] = "skipped"
         sb.table("uncategorized_transactions").update(payload).in_("uncategorized_transaction_id", ids).execute()
+
     embed_txns = strat_groups["VECTOR_SEARCH"] + strat_groups["NO_RULE"] + strat_groups["EXACT_THEN_DUMP"]
     if not embed_txns:
         _finish(sb, document_id, txns, user_id)
         return
+
     # ── 4. Collect Embeddings ──────────────────────────────────────────────────
-    import time
     all_clean = [t["clean_string"] for t in embed_txns]
     embeddings = []
-    for i in range(0, len(all_clean), EMBED_BATCH_SIZE):
-        embeddings.extend(_embed_batch(all_clean[i:i+EMBED_BATCH_SIZE]))
+    
+    with httpx.Client(follow_redirects=True, timeout=120.0) as client:
+        for i in range(0, len(all_clean), EMBED_BATCH_SIZE):
+            batch = all_clean[i : i + EMBED_BATCH_SIZE]
+            logger.info("Fetching batch of %d embeddings...", len(batch))
+            embeddings.extend(_embed_batch(client, batch))
 
-    # Update embeddings one by one with a tiny delay to avoid 429 and identity column issues
-    logger.info("Updating %d embeddings...", len(embeddings))
-    for txn, emb in zip(embed_txns, embeddings):
-        if emb:
+        # ── 5. Update Database ────────────────────────────────────────────────
+        logger.info("Updating %d embeddings in DB...", len(embeddings))
+        for txn, emb in zip(embed_txns, embeddings):
+            if not emb: continue
+            
             txn["embedding"] = emb
-            sb.table("uncategorized_transactions").update({
-                "embedding": emb, 
-                "clean_merchant_name": txn["clean_string"]
-            }).eq("uncategorized_transaction_id", txn["uncategorized_transaction_id"]).execute()
-            time.sleep(0.05) # Tiny sleep to prevent rate-limiting
+            try:
+                # We MUST exclude the identity column (uncategorized_transaction_id) from the update body
+                # to avoid "cannot insert a non-DEFAULT value" errors on GENERATED ALWAYS columns.
+                sb.table("uncategorized_transactions").update({
+                    "embedding": emb,
+                    "clean_merchant_name": txn["clean_string"]
+                }).eq("uncategorized_transaction_id", txn["uncategorized_transaction_id"]).execute()
+                
+                # Small sleep to prevent overwhelming the connection pool/DB
+                time.sleep(0.01) 
+            except Exception as e:
+                logger.error(f"Failed to update embedding for txn {txn.get('uncategorized_transaction_id')}: {e}")
 
-    # ── 5. Perform Grouping ────────────────────────────────────────────────────
-    embedded = [t for t in embed_txns if t.get("embedding")]
-    if embedded:
-        embedded = _group_within_batch(embedded)
-        logger.info("Updating %d group IDs...", len(embedded))
-        for t in embedded:
-            sb.table("uncategorized_transactions").update({
-                "group_id": t["group_id"]
-            }).eq("uncategorized_transaction_id", t["uncategorized_transaction_id"]).execute()
-            time.sleep(0.05)
+        # ── 6. Perform Grouping ────────────────────────────────────────────────
+        embedded_rows = [t for t in embed_txns if t.get("embedding")]
+        if embedded_rows:
+            logger.info("Grouping %d embedded transactions...", len(embedded_rows))
+            embedded_rows = _group_within_batch(embedded_rows)
+            
+            logger.info("Updating %d group IDs in DB...", len(embedded_rows))
+            for t in embedded_rows:
+                try:
+                    sb.table("uncategorized_transactions").update({
+                        "group_id": t["group_id"]
+                    }).eq("uncategorized_transaction_id", t["uncategorized_transaction_id"]).execute()
+                    time.sleep(0.01)
+                except Exception as e:
+                    logger.error(f"Failed to update group_id for txn {t.get('uncategorized_transaction_id')}: {e}")
     
     _finish(sb, document_id, txns, user_id)
 
 def _finish(sb, doc_id, txns, user_id):
-    import time
     ids = [t["uncategorized_transaction_id"] for t in txns]
     if ids:
         sb.table("uncategorized_transactions").update({"grouping_status": "done"}).in_("uncategorized_transaction_id", ids).execute()
     
     sb.table("documents").update({"grouping_status": "pipeline_running", "updated_at": "now()"}).eq("document_id", doc_id).execute()
     
-    # Wait a moment for DB to settle and avoid Render rate-limiting the next call
-    time.sleep(2)
+    time.sleep(1) # Reduced from 2s
     
     node_url = os.environ.get("NODE_BACKEND_URL", "http://127.0.0.1:3000")
     secret = os.environ.get("INTERNAL_SECRET", "")
     if secret:
         logger.info("Triggering Node.js auto-pipeline for doc %s...", doc_id)
         try:
-            httpx.post(
-                f"{node_url}/internal/auto-pipeline", 
-                json={"document_id": doc_id, "user_id": user_id}, 
-                headers={"Authorization": f"Bearer {secret}"}, 
-                timeout=120.0
-            )
+            with httpx.Client() as client:
+                client.post(
+                    f"{node_url}/internal/auto-pipeline", 
+                    json={"document_id": doc_id, "user_id": user_id}, 
+                    headers={"Authorization": f"Bearer {secret}"}, 
+                    timeout=120.0
+                )
         except Exception as e:
             logger.error("Failed to trigger Node.js pipeline: %s", e)

@@ -114,30 +114,49 @@ def _get_first_pages_text(pages: List[str], max_pages: int = 3) -> str:
 # ════════════════════════════════════════════════════════════
 
 def _get_column_set(identifier_json: dict) -> set:
-    """Extract a set of normalised column names."""
+    """
+    Extract a set of normalised column names.
+    Strips whitespace, units in brackets (INR), and non-alphanumeric noise.
+    """
     headers = (
         identifier_json
         .get("identity_markers", {})
         .get("transaction_table_identity", {})
         .get("table_header_markers", [])
     )
-    return {
-        re.sub(r"\s+", "", str(h).lower())
-        for h in headers
-        if h and str(h).strip()
-    }
+    cols = set()
+    for h in headers:
+        if not h or not str(h).strip():
+            continue
+        
+        # 1. Lowercase and remove whitespace
+        s = str(h).lower().strip()
+        s = re.sub(r"\s+", "", s)
+        
+        # 2. Strip bracketed noise (INR), (Cr/Dr), (Rs.)
+        s = re.sub(r"\(.*?\)", "", s)
+        
+        # 3. Remove non-alphanumeric (No. -> No, Cr/Dr -> CrDr)
+        s = re.sub(r"[^a-z0-9]", "", s)
+        
+        # 4. Remove common currency/unit suffix noise if attached
+        if s.endswith("inr"): s = s[:-3]
+        if s.endswith("rs"):  s = s[:-2]
+
+        if s:
+            cols.add(s)
+            
+    return cols
 
 
 def check_format_exists(
     new_id_json: dict,
-    col_similarity_threshold: float = 0.65,  # Lowered from 0.80: LLM varies column names across runs
+    col_similarity_threshold: float = 0.65,
 ) -> Optional[Dict]:
     """
     Check if an equivalent format exists in the database.
 
     Match criteria: Same Institution Name + Column Overlap >= threshold (Jaccard).
-
-    Returns the matching row dict, or None.
     """
     raw_inst      = new_id_json.get("institution_name") or ""
     new_norm_inst = normalise_institution_name(raw_inst)
@@ -181,6 +200,11 @@ def check_format_exists(
         if col_overlap >= col_similarity_threshold and col_overlap > best_overlap:
             best_overlap = col_overlap
             best_match   = row
+        elif col_overlap > 0:
+            logger.debug(
+                "check_format_exists: partial match for %s (overlap=%.2f < %.2f)",
+                new_norm_inst, col_overlap, col_similarity_threshold
+            )
 
     if best_match:
         logger.info(
@@ -190,8 +214,8 @@ def check_format_exists(
         return best_match
 
     logger.info(
-        "check_format_exists: NO match for institution='%s' with overlap threshold %.2f",
-        new_norm_inst, col_similarity_threshold,
+        "check_format_exists: NO match for institution='%s' (cols=%s) with threshold %.2f",
+        new_norm_inst, list(new_cols), col_similarity_threshold,
     )
     return None
 
