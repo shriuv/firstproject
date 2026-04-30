@@ -6,7 +6,8 @@
  * Called by the Python merchant_grouping job (via HTTP) after grouping
  * completes for a document. Not user-facing — protected by a shared secret.
  *
- * Runs Stages 1–3 of the categorisation pipeline:
+ * Runs Stage 0 and Stages 1–3 of the categorisation pipeline:
+ *   Stage 0   — Contra Radar (inter-account transfer detection)
  *   Stage 1   — FAST_PATH (rules engine)
  *   Stage 1.5 — EXACT_THEN_DUMP (P_EXACT personal exact cache)
  *   Stage 3   — Vector similarity (P_VEC → G_KEY → G_VEC)
@@ -23,6 +24,7 @@ const supabase = require('../config/supabaseClient');
 const rulesEngineService = require('../services/rulesEngineService');
 const personalCacheService = require('../services/personalCacheService');
 const vectorMatchService = require('../services/vectorMatchService');
+const contraRadarService = require('../services/contraRadarService');
 
 // ── Person-name heuristic ───────────────────────────────────────────────────
 function isPotentialPerson(cleanName) {
@@ -155,10 +157,61 @@ async function runAutoPipeline(req, res) {
     const pending = uncatRows || [];
     if (pending.length === 0) return res.json({ resolved: 0, llm_pending: 0, document_id });
 
-    // 2. Pre-computed Map
+    // ── STAGE 0: Contra Radar ──────────────────────────────────────────────────
+    // Detect inter-account transfers (e.g. bank → CC payment, wallet top-up).
+    // Contra rows are inserted immediately and excluded from further categorisation.
+    logger.info('[AUTO-PIPELINE] Stage 0: Contra Radar', { count: pending.length });
+    const contraResolved = await contraRadarService.findAndLinkContras(pending, user_id, supabase);
+
+    const contraRows = contraResolved
+      .filter(t => t.is_contra === true)
+      .map(t => ({
+        user_id,
+        document_id,
+        base_account_id: t.account_id || null,
+        transaction_date: t.txn_date,
+        details: t.details,
+        amount: t.debit || t.credit || 0,
+        transaction_type: t.debit ? 'DEBIT' : 'CREDIT',
+        offset_account_id: t.offset_account_id,
+        categorised_by: t.categorised_by || 'G_RULE',
+        confidence_score: t.confidence_score || 1.0,
+        is_contra: true,
+        attention_level: 'LOW',
+        review_status: 'PENDING',
+        posting_status: 'DRAFT',
+        uncategorized_transaction_id: t.uncategorized_transaction_id || null,
+      }))
+      .filter(r => r.offset_account_id); // safety: must have destination
+
+    if (contraRows.length > 0) {
+      const { error: contraInsertErr } = await supabase.from('transactions').insert(contraRows);
+      if (contraInsertErr) {
+        logger.error('[AUTO-PIPELINE] Contra insert failed', { error: contraInsertErr.message });
+      } else {
+        logger.info('[AUTO-PIPELINE] Contra rows inserted', { count: contraRows.length });
+        const contraUncatIds = contraRows.map(r => r.uncategorized_transaction_id).filter(Boolean);
+        if (contraUncatIds.length > 0) {
+          await supabase.from('uncategorized_transactions')
+            .update({ grouping_status: 'categorized' })
+            .in('uncategorized_transaction_id', contraUncatIds);
+        }
+      }
+    }
+
+    // Exclude contra rows from further pipeline stages
+    const contraUncatIdSet = new Set(contraRows.map(r => r.uncategorized_transaction_id).filter(Boolean));
+    const nonContraPending = pending.filter(t => !contraUncatIdSet.has(t.uncategorized_transaction_id));
+
+    logger.info('[AUTO-PIPELINE] Stage 0 complete', {
+      contras: contraRows.length,
+      remaining: nonContraPending.length
+    });
+
+    // 2. Pre-computed Map — only for non-contra transactions
     const preComputedMap = new Map();
     const groupRepMap = new Map();
-    for (const row of pending) {
+    for (const row of nonContraPending) {
       preComputedMap.set(row.uncategorized_transaction_id, row);
       if (row.group_id && (!groupRepMap.has(row.group_id) || row.uncategorized_transaction_id < groupRepMap.get(row.group_id))) {
         groupRepMap.set(row.group_id, row.uncategorized_transaction_id);
@@ -170,7 +223,7 @@ async function runAutoPipeline(req, res) {
     const llmLeftovers = [];          
 
     // 3. STAGE 1 & 1.5: Fast Path and Personal Exact
-    const representatives = pending.filter(txn => !txn.group_id || groupRepMap.get(txn.group_id) === txn.uncategorized_transaction_id);
+    const representatives = nonContraPending.filter(txn => !txn.group_id || groupRepMap.get(txn.group_id) === txn.uncategorized_transaction_id);
     const vectorNeeded = [];
 
     for (const txn of representatives) {
@@ -223,8 +276,8 @@ async function runAutoPipeline(req, res) {
       }));
     }
 
-    // 5. Fan-out and Batch Insert
-    for (const txn of pending) {
+    // 5. Fan-out group siblings using nonContraPending
+    for (const txn of nonContraPending) {
       if (txn.group_id && groupRepMap.get(txn.group_id) !== txn.uncategorized_transaction_id) {
         const res = groupResultMap.get(txn.group_id);
         if (res) resolvedRows.push({ txn, result: res });

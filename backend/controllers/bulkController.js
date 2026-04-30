@@ -1,5 +1,5 @@
 const logger = require('../utils/logger');
-const contraRadarService = require('../services/contraRadarService');
+
 const supabase = require('../config/supabaseClient');
 const llmBatchFallback = require('../services/llmBatchFallback');
 
@@ -215,22 +215,12 @@ async function processUploadSSE(req, res) {
     }
 
     // ==========================================
-    // STAGE 0: BATCH CONTRA RADAR (Pre-Loop)
+    // STAGE 0: CONTRA RADAR (moved to autoPipeline)
+    // Contra detection now runs inside autoPipelineController right after upload.
+    // Emit the SSE signal so the frontend refreshes; no work needed here.
     // ==========================================
-    emit('Checking for internal transfers…', 'contra');
-    logger.info('Stage 0: Running Contra Radar');
-    const resolvedTransactions = await contraRadarService.findAndLinkContras(transactions, userId, supabase);
-
-    // ── FLUSH 1: Contra transactions ─────────────────────────────────────────
-    const contraItems = resolvedTransactions
-      .filter(t => t.is_contra === true)
-      .map(t => ({ ...t, base_account_id: t.account_id || null }));
-
-    if (contraItems.length > 0) {
-      await flushToDb(contraItems);
-      res.write(`data: ${JSON.stringify({ flush: true, stage: 'contra' })}\n\n`);
-      logger.info('Flush 1 (contra) complete', { count: contraItems.length });
-    }
+    res.write(`data: ${JSON.stringify({ flush: true, stage: 'contra' })}\n\n`);
+    logger.info('Flush 1 (contra) signal sent — contra detection already handled by auto-pipeline');
 
     // ── FLUSH 2: No-op signal — pre-categorised rows written by auto-pipeline ─
     // auto-pipeline already wrote Stages 1–3 rows to transactions.
