@@ -18,6 +18,9 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     if (!cleanMerchant || !userId) return null;
 
     const uppercaseString = cleanMerchant.toUpperCase();
+    // Raw fallback: some keywords live in segments dropped by sanitizeMerchantString
+    // (e.g. user notes in UPI/DR/.../Cake format). Test both so nothing is silently lost.
+    const uppercaseRaw = cleanString ? cleanString.toUpperCase() : uppercaseString;
 
     // 🛡️ MEANINGFULNESS GUARD
     // If the cleaned string is a single token with no spaces (likely a person name
@@ -84,10 +87,12 @@ async function findVectorMatch(cleanString, userId, transactionType) {
         const keyword = rule.keyword.toUpperCase();
         let isMatch = false;
         if (rule.match_type === 'EXACT') {
+          // EXACT only tests sanitized form to avoid matching raw junk
           isMatch = (uppercaseString === keyword);
         } else {
           const regex = new RegExp(`\\b${keyword}S?\\b`, 'i');
-          isMatch = regex.test(uppercaseString);
+          // Two-pass: sanitized first, then raw — catches keywords in dropped UPI note segments
+          isMatch = regex.test(uppercaseString) || regex.test(uppercaseRaw);
         }
 
         if (!isMatch) continue;
@@ -255,8 +260,11 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
     // High-confidence deterministic matching for known merchants (e.g. SWIGGY, ZOMATO, AIRTEL).
     // Runs only when cleanName is available; silently skipped otherwise.
     if (cleanName) {
-      // Use the sanitized version for matching, not the raw cleanName
+      // Use the sanitized version as primary match target
       const uppercaseCleanName = sanitizeMerchantString(cleanName).toUpperCase();
+      // Raw fallback: sanitizeMerchantString can drop UPI note segments (e.g. UPI/DR/.../Cake)
+      // Two-pass matching ensures keywords anywhere in the original string are still caught.
+      const uppercaseRawName = cleanName.toUpperCase();
       
       // MEANINGFULNESS GUARD for bulk pipeline
       const looksLikePersonNameBulk = (
@@ -275,14 +283,16 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
           
           let isMatch = false;
           if (rule.match_type === 'EXACT') {
+            // EXACT only tests sanitized form to avoid matching raw junk
             isMatch = (uppercaseCleanName === keyword);
           } else {
             if (keyword.length < 5) {
               // Support trailing 's' for short words (e.g. EGG vs EGGS)
               const regex = new RegExp(`\\b${keyword}S?\\b`, 'i');
-              isMatch = regex.test(uppercaseCleanName);
+              // Two-pass: sanitized first, raw fallback for dropped segments
+              isMatch = regex.test(uppercaseCleanName) || regex.test(uppercaseRawName);
             } else {
-              isMatch = uppercaseCleanName.includes(keyword);
+              isMatch = uppercaseCleanName.includes(keyword) || uppercaseRawName.includes(keyword);
             }
           }
 
@@ -534,15 +544,17 @@ function sanitizeMerchantString(str) {
     }
   }
 
-  // 1.5. Aggressively extract user notes/payee from UPI (ICICI Style)
-  // Format: UPI/TxnID/NoteOrName/Handle/Bank/HexHash
+  // Step 1.5: UPI slash format extraction
   if (str.startsWith('UPI/')) {
     const parts = str.split('/');
-    if (parts.length >= 4 && parts[2].trim().length > 0) {
-      cleanStr = parts[2].trim();
+    // TJSB/SBI format: UPI/DR|CR/refnum/merchant/...
+    if (parts[1]?.toUpperCase() === 'DR' || parts[1]?.toUpperCase() === 'CR') {
+      cleanStr = parts[3]?.trim() || cleanStr;  // merchant is at index 3
+    } else if (parts.length >= 4) {
+      cleanStr = parts[2]?.trim() || cleanStr;  // ICICI: merchant at index 2
     }
   }
-
+  
   // 2. Perform standard cleanup filters on remains or generic strings
   return cleanStr
     .replace(/^UPI[-/]/i, '')           // Remove UPI prefix with hyphen or slash
