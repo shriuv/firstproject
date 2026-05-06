@@ -426,13 +426,18 @@ const Analytics = () => {
           accountMap[account_id].totalCredit += entry.credit_amount || 0;
         });
 
-        // Compute final balance per account (DO NOT FILTER ZERO BALANCES)
-        const accounts = Object.values(accountMap).map(acc => ({
-          ...acc,
-          balance: acc.balance_nature === 'DEBIT'
-            ? acc.totalDebit - acc.totalCredit
-            : acc.totalCredit - acc.totalDebit
-        }));
+        const accounts = Object.values(accountMap).map(acc => {
+          let balance = 0;
+          if (acc.account_type === 'ASSET') {
+            balance = acc.totalCredit - acc.totalDebit;
+          } else if (acc.account_type === 'LIABILITY') {
+            balance = acc.totalDebit - acc.totalCredit;
+          } else {
+             // Equity
+            balance = acc.totalCredit - acc.totalDebit;
+          }
+          return { ...acc, balance };
+        });
 
         const assetsGroups = {};
         const liabilitiesEquitiesGroups = {};

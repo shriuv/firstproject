@@ -29,11 +29,11 @@ const Overview = () => {
       const enriched = Object.values(globalLedgerMap)
         .filter(acc => acc.account_type === 'LIABILITY')
         .map(acc => {
-          const balance = acc.balance_nature === 'CREDIT'
-            ? acc.totalCredit - acc.totalDebit
-            : acc.totalDebit - acc.totalCredit;
-          // Determine subtype tag: overdraft bank or credit card
-          const tag = acc.balance_nature === 'DEBIT' ? 'Bank Overdraft' : 'Credit Card';
+          // In bank-perspective statements, Credit Card spending is Debit, payment is Credit.
+          // Therefore, Liability balance = totalDebit - totalCredit
+          const balance = acc.totalDebit - acc.totalCredit;
+          // Determine subtype tag based on account name
+          const tag = acc.account_name.toLowerCase().includes('card') ? 'Credit Card' : 'Liability';
           return { name: acc.account_name, amount: balance, tag };
         })
         .sort((a, b) => b.amount - a.amount);
@@ -44,9 +44,9 @@ const Overview = () => {
       const perAccount = Object.values(globalLedgerMap)
         .filter(acc => acc.account_type === 'ASSET')
         .map(acc => {
-          const balance = acc.balance_nature === 'DEBIT'
-            ? acc.totalDebit - acc.totalCredit
-            : acc.totalCredit - acc.totalDebit;
+          // In bank-perspective statements, Bank Account income is Credit, expense is Debit.
+          // Therefore, Asset balance = totalCredit - totalDebit
+          const balance = acc.totalCredit - acc.totalDebit;
           return { name: acc.account_name, amount: balance };
         })
         .sort((a, b) => b.amount - a.amount);
@@ -80,9 +80,14 @@ const Overview = () => {
       // Intentionally NOT filtering by selectedAccountId.
       // Total Assets and Total Liabilities represent the global Balance Sheet.
 
-      const balance = acc.balance_nature === 'DEBIT'
-        ? acc.totalDebit - acc.totalCredit
-        : acc.totalCredit - acc.totalDebit;
+      let balance = 0;
+      if (acc.account_type === 'ASSET') {
+        balance = acc.totalCredit - acc.totalDebit;
+      } else if (acc.account_type === 'LIABILITY') {
+        balance = acc.totalDebit - acc.totalCredit;
+      } else {
+        balance = acc.totalCredit - acc.totalDebit;
+      }
 
       if (acc.account_type === 'ASSET') {
         totalAssetsVal += balance;
