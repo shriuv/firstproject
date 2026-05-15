@@ -170,7 +170,7 @@ def _classify_transactions(txns: list[dict], routing_rules: list[dict]) -> list[
         txn["clean_string"] = _derive_clean_string_no_rule(details)
         matched = False
         for rule in routing_rules:
-            if re.search(rule.get("pattern", ""), details, re.IGNORECASE):
+            if re.search(rule.get("pattern", "").upper(), details, re.IGNORECASE):
                 txn["pre_pipeline_strategy"] = rule.get("strategy_type", "")
                 matched = True
                 break

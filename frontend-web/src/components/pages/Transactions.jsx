@@ -6,6 +6,8 @@ import { supabase } from '../../shared/supabase';
 import { formatDate } from '../../utils/dateUtils';
 import { ICONS } from '../Icons';
 import '../../styles/Transactions.css';
+import API from '../../api/api';
+import PDFViewer from '../PDFViewer';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000';
 const ATTENTION_ORDER = ['HIGH', 'MEDIUM', 'LOW'];
@@ -240,6 +242,13 @@ const Transactions = () => {
   const [reviewValidationMsg, setReviewValidationMsg] = useState('');
   const [reviewApproving, setReviewApproving] = useState(false);
   const [reviewDone, setReviewDone] = useState(false);
+
+  // ── PDF Viewer popup state ────────────────────────────────────────
+  const [activeReviewDocumentId, setActiveReviewDocumentId] = useState(null);
+  const [pdfMapData, setPdfMapData] = useState([]);
+  const [pdfPageCount, setPdfPageCount] = useState(0);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfHighlightIndex, setPdfHighlightIndex] = useState(null);
 
   // ── Manual Add popup state ────────────────────────────────────────
   const EMPTY_MANUAL_FORM = {
@@ -1342,6 +1351,48 @@ const Transactions = () => {
     return queue;
   };
 
+  // Fetch PDF map when reviewing a new document
+  useEffect(() => {
+    if (!isReviewOpen || reviewQueue.length === 0) return;
+    const current = reviewQueue[reviewIndex];
+    if (!current || !current.document_id) return;
+
+    if (current.document_id !== activeReviewDocumentId) {
+      setActiveReviewDocumentId(current.document_id);
+      setPdfLoading(true);
+      API.get(`/documents/${current.document_id}/pdf-map`)
+        .then(res => {
+          setPdfMapData(res.data.transactions || []);
+          setPdfPageCount(res.data.page_count || 0);
+        })
+        .catch(err => console.error(err))
+        .finally(() => setPdfLoading(false));
+    }
+  }, [isReviewOpen, reviewIndex, reviewQueue, activeReviewDocumentId]);
+
+  // Match the current transaction with the PDF bounding box
+  useEffect(() => {
+    if (!isReviewOpen || !pdfMapData.length || !reviewQueue[reviewIndex]) return;
+    const current = reviewQueue[reviewIndex];
+    
+    // We match against original data to be safe, not the edited state
+    const date = String(current.txn_date || '').split('T')[0];
+    const amount = parseFloat(current.debit != null ? current.debit : (current.credit ?? 0));
+    
+    let foundIdx = null;
+    for (let j = 0; j < pdfMapData.length; j++) {
+      const pt = pdfMapData[j];
+      if (!pt.bbox) continue;
+      const pdfDate = String(pt.date || pt.txn_date || '').split('T')[0];
+      const pdfAmt  = parseFloat(pt.debit || pt.credit || 0);
+      if (pdfDate === date && Math.abs(pdfAmt - amount) < 0.05) {
+        foundIdx = j;
+        break;
+      }
+    }
+    setPdfHighlightIndex(foundIdx);
+  }, [isReviewOpen, reviewIndex, pdfMapData, reviewQueue]);
+
   const openReview = (startId = null) => {
     // When a specific row is clicked (startId given), build a full queue that
     // includes ALL transactions in the current filter (including APPROVED ones)
@@ -1436,6 +1487,9 @@ const Transactions = () => {
     setReviewPickerField(null);
     setReviewValidationMsg('');
     setReviewApproving(false);
+    setActiveReviewDocumentId(null);
+    setPdfMapData([]);
+    setPdfHighlightIndex(null);
     fetchTransactions(activeFilter, true);
   };
 
@@ -1544,6 +1598,15 @@ const Transactions = () => {
    * Next handler — advance to the next card in the queue.
    * Unsaved edits are discarded. Nothing is written to the DB.
    */
+  /**
+   * Previous handler — go back one card without saving.
+   */
+  const handleReviewPrev = () => {
+    if (reviewIndex <= 0) return;
+    setReviewIndex(prev => prev - 1);
+    setReviewValidationMsg('');
+  };
+
   const handleReviewSkip = () => {
     const current = reviewQueue[reviewIndex];
     if (!current) return;
@@ -1911,7 +1974,6 @@ const Transactions = () => {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReviewOpen, reviewIndex, reviewQueue, reviewEditState]);
 
@@ -2806,7 +2868,8 @@ const Transactions = () => {
       {/* ── Manual Review Popup ── */}
       {isReviewOpen && (
         <div className="review-overlay" onClick={closeReview}>
-          <div className="review-card" onClick={e => e.stopPropagation()}>
+          <div className="review-split-layout" onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: '16px', maxWidth: '95vw', maxHeight: '92vh', height: '800px', width: '100%', justifyContent: 'center' }}>
+            <div className="review-card" style={{ flexShrink: 0, margin: 0, height: '100%', maxWidth: '540px', width: '100%' }}>
 
             {reviewDone ? (
               <div className="review-done-screen">
@@ -2850,7 +2913,7 @@ const Transactions = () => {
 
               return (
                 <>
-                  {/* Header */}
+                  {/* Header — redesigned: date + status badge inline on right, close button */}
                   <div className="review-header" style={{ alignItems: 'center' }}>
                     <div>
                       <h2 className="review-title">Manual Review</h2>
@@ -2874,7 +2937,7 @@ const Transactions = () => {
                   {/* Body */}
                   <div className="review-body">
 
-                    {/* Details */}
+                    {/* Details — textarea for multi-line */}
                     <div className="review-field">
                       <label className="review-field-label">Details</label>
                       <textarea
@@ -2887,7 +2950,7 @@ const Transactions = () => {
                       />
                     </div>
 
-                    {/* Amount & Accounts Row */}
+                    {/* Amount & Accounts — side-by-side layout */}
                     <div style={{ display: 'flex', gap: '16px', alignItems: 'stretch' }}>
                       {/* Left Side: Amount */}
                       <div style={{ flex: '0 0 140px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -2977,9 +3040,9 @@ const Transactions = () => {
                     <div className="review-validation-msg">{reviewValidationMsg}</div>
                   )}
 
-                  {/* Footer — fixed 4-slot layout: Prev | Save | spacer | Next | Approve */}
+                  {/* Footer — 4-slot layout: Prev | Save | Next | Approve */}
                   <div className="review-footer">
-                    {/* ← Prev: always in DOM, invisible on first card */}
+                    {/* ← Prev: invisible on first card */}
                     <button
                       className="action-btn review-prev-btn"
                       onClick={handleReviewPrev}
@@ -2990,7 +3053,7 @@ const Transactions = () => {
                       ← Prev
                     </button>
 
-                    {/* Save: always in DOM, invisible when no unsaved edits */}
+                    {/* Save: invisible when no unsaved edits */}
                     {(() => {
                       const hasEdits = Object.keys(reviewEditState[reviewQueue[reviewIndex]?.uncategorized_transaction_id] || {}).length > 0;
                       return (
@@ -3019,8 +3082,7 @@ const Transactions = () => {
                       Next →
                     </button>
 
-                    {/* Approve button — shown for all non-APPROVED rows, and also for */}
-                    {/* already-APPROVED rows (saves edits + advances to next card).   */}
+                    {/* Approve — different label/style for already-approved rows */}
                     {txnRow?.review_status !== 'APPROVED' ? (
                       <button
                         className="action-btn approve-selected has-selection review-approve-btn"
@@ -3051,6 +3113,25 @@ const Transactions = () => {
                 </>
               );
             })()}
+
+            </div>
+
+            {/* PDF Viewer Pane */}
+            <div className="pdf-viewer-card" style={{ flex: 1, minWidth: '400px', maxWidth: '800px', background: 'var(--bg-secondary)', borderRadius: '20px', overflow: 'hidden', border: '1px solid var(--glass-border)', boxShadow: '0 32px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.04)' }}>
+               {pdfLoading ? (
+                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary)' }}>Loading PDF...</div>
+               ) : pdfMapData.length > 0 ? (
+                 <PDFViewer
+                    documentId={activeReviewDocumentId}
+                    transactions={pdfMapData}
+                    pageCount={pdfPageCount}
+                    selectedTxnIndex={pdfHighlightIndex}
+                    hidePageCount={true}
+                 />
+               ) : (
+                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-secondary)' }}>No PDF evidence available</div>
+               )}
+            </div>
 
           </div>
 

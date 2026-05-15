@@ -6,9 +6,10 @@ import {
 } from "lucide-react";
 // import API from "../api/api";
 import API from "../api/api";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useParsing, extractionSteps } from "../context/ParsingContext";
 import { formatDate } from "../utils/dateUtils";
+import '../styles/Overview.css';
 
 // ── Circular Processing Indicator ────────────────────────────────────────────
 const STAGE_META = {
@@ -93,6 +94,7 @@ function CircularProgress({ processingStatus, status, elapsedSeconds, parsedType
 
 export default function ParsingPage() {
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
     const { activeDoc, isExtracting, startExtraction, clearActiveDoc, maxStepReached } = useParsing();
 
     const [file, setFile] = useState(null);
@@ -112,9 +114,13 @@ export default function ParsingPage() {
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [isDeleting, setIsDeleting] = useState(false);
 
-    // Pagination & Filter State
-    const [currentPage, setCurrentPage] = useState(1);
-    const [pageSize] = useState(15);
+    // Pagination & Filter State — page stored in URL so back button restores it
+    const currentPage = parseInt(searchParams.get('page') || '1', 10);
+    const setCurrentPage = (page) => {
+        const p = typeof page === 'function' ? page(currentPage) : page;
+        setSearchParams(prev => { const n = new URLSearchParams(prev); n.set('page', String(p)); return n; }, { replace: true });
+    };
+    const pageSize = 8;
     const [totalResults, setTotalResults] = useState(0);
     const [searchTerm, setSearchTerm] = useState("");
     
@@ -264,9 +270,9 @@ export default function ParsingPage() {
     };
 
     return (
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-            <div style={{ marginBottom: '2rem' }}>
-                <h2 style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)' }}>Extraction Dashboard</h2>
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} style={{ padding: '32px 40px' }}>
+            <div className="overview-header">
+                <h1>Parsing</h1>
             </div>
 
             <div className="upload-page-card" style={{

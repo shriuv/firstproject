@@ -12,12 +12,13 @@
     "@supabase/supabase-js": "^2.38.0",
     "axios": "^1.13.6",
     "framer-motion": "^12.34.5",
-    "lucide-react": "^0.576.0",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "lucide-react": "^1.14.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^7.13.1",
-    "jspdf": "^4.2.1",
-    "jspdf-autotable": "^5.0.7"
+    "react-pdf": "^10.4.1",
+    "react-router-dom": "^7.13.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.0",

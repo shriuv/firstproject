@@ -10,6 +10,7 @@ import logging
 import threading
 import uuid
 import hashlib
+import base64
 from typing import Optional
 from db.connection import get_client, make_client, set_thread_client, clear_thread_client
 from services.account_detector import get_user_accounts, link_document_to_account, create_user_account
@@ -531,14 +532,25 @@ async def get_document_review(document_id: int, user=Depends(get_current_user)):
     user_accounts = get_user_accounts(user_id_for_accounts)
 
     res = {
+        "document_id":            document_id,
+        "file_name":              doc["file_name"],
         "bank_name":              bank_name,
         "identifier_json":        ident_json,
         "code_transactions":      code_txns,
         "llm_transactions":       llm_txns,
         "status":                 doc["status"],
+        "created_at":             doc["created_at"],
         "transaction_parsed_type": doc.get("transaction_parsed_type"),
-        "selected_account_id":    doc.get("account_id"),   # already linked account if any
-        "user_accounts":          user_accounts,           # list for dropdown
+        "selected_account_id":    doc.get("account_id"),
+        "user_accounts":          user_accounts,
+        # Essential metadata for display
+        "account_number":         doc.get("account_number"),
+        "client_name":            doc.get("client_name"),
+        "period_start":           doc.get("period_start"),
+        "period_end":             doc.get("period_end"),
+        "opening_balance":        doc.get("opening_balance"),
+        "closing_balance":        doc.get("closing_balance"),
+        "duplicates_count":       0 # Will be updated below
     }
 
     # ── START DEDUPLICATION LOGIC ─────────────────────────────────────────────
@@ -837,9 +849,32 @@ async def approve_document(
 
     try:
         sb.table("uncategorized_transactions").insert(rows).execute()
-        sb.table("documents").update({"status": "APPROVE"}).eq("document_id", document_id).execute()
+        
+        # Update document status and ALSO the parser_type actually used for this approval
+        sb.table("documents").update({
+            "status": "APPROVE",
+            "transaction_parsed_type": parser_used
+        }).eq("document_id", document_id).execute()
+
+        # Persist the final (possibly edited/manually added) transactions back to staging
+        # so that the Review screen stays in sync with what was actually approved.
+        if staging_id:
+            sb.table("ai_transactions_staging").update({
+                "transaction_json": transactions_to_approve
+            }).eq("staging_transaction_id", staging_id).execute()
+        else:
+            # If for some reason no staging row exists for this parser, create one 
+            # to ensure the manual additions are preserved for the review screen.
+            sb.table("ai_transactions_staging").insert({
+                "document_id": document_id,
+                "user_id": user_id,
+                "parser_type": parser_used,
+                "transaction_json": transactions_to_approve,
+                "overall_confidence": 1.0
+            }).execute()
+
     except Exception as insert_err:
-        logger.error("Approve doc=%s — INSERT FAILED: %s", document_id, insert_err)
+        logger.error("Approve doc=%s — INSERT/UPDATE FAILED: %s", document_id, insert_err)
         raise HTTPException(status_code=500, detail=f"Failed to save transactions: {insert_err}")
 
     inserted = len(rows)
@@ -1075,3 +1110,206 @@ async def download_transactions_json(document_id: int, user=Depends(get_current_
             "Content-Disposition": f'attachment; filename="{safe_name}_transactions.json"'
         }
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF Map  — transactions with rubber-binding bounding boxes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{document_id}/pdf-map")
+async def get_pdf_map(document_id: int, user=Depends(get_current_user)):
+    """
+    Returns the extracted transactions for this document, each augmented with:
+      - bbox: [x0, y0, x1, y1]  (PDF coordinate space, None if not matched)
+      - page: int  (1-indexed page number, None if not matched)
+
+    The PDF is downloaded from Supabase Storage, rubber-binding is applied
+    on top of the existing extracted transactions — extraction logic is unchanged.
+    Password-protected PDFs are handled automatically using the stored password.
+    """
+    user_id = user["user_id"]
+    sb = get_client()
+
+    # 1. Fetch document
+    doc_result = (
+        sb.table("documents")
+        .select("document_id, file_path, is_password_protected, transaction_parsed_type")
+        .eq("document_id", document_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not doc_result.data:
+        raise HTTPException(status_code=404, detail="Document not found")
+    doc = doc_result.data
+
+    # 2. Fetch password if protected
+    password = None
+    if doc.get("is_password_protected"):
+        pw_result = (
+            sb.table("document_password")
+            .select("encrypted_password")
+            .eq("document_id", document_id)
+            .maybe_single()
+            .execute()
+        )
+        if pw_result.data:
+            password = pw_result.data.get("encrypted_password")
+
+    # 3. Fetch extracted transactions from staging
+    preferred_parser = doc.get("transaction_parsed_type") or "CODE"
+    staging_result = (
+        sb.table("ai_transactions_staging")
+        .select("transaction_json, parser_type")
+        .eq("document_id", document_id)
+        .execute()
+    )
+    staging_rows = staging_result.data or []
+    transactions = []
+    for row in staging_rows:
+        if row["parser_type"] == preferred_parser:
+            txn_data = row["transaction_json"]
+            if isinstance(txn_data, str):
+                txn_data = json.loads(txn_data)
+            if isinstance(txn_data, list):
+                transactions = txn_data
+            break
+    # Fallback to first available
+    if not transactions and staging_rows:
+        txn_data = staging_rows[0]["transaction_json"]
+        if isinstance(txn_data, str):
+            txn_data = json.loads(txn_data)
+        if isinstance(txn_data, list):
+            transactions = txn_data
+
+    if not transactions:
+        return {"transactions": [], "page_count": 0}
+
+    # 4. Download PDF to temp file
+    storage_path = doc["file_path"]
+    tmp_path = None
+    try:
+        pdf_bytes = sb.storage.from_(SUPABASE_STORAGE_BUCKET).download(storage_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        # 5. Apply rubber binding (post-processing only — no change to extraction)
+        from services.rubber_binding import attach_bboxes
+        augmented = attach_bboxes(transactions, tmp_path, password=password)
+
+        # 6. Count pages
+        page_count = 0
+        try:
+            import fitz
+            doc_fitz = fitz.open(tmp_path)
+            if doc_fitz.is_encrypted:
+                doc_fitz.authenticate(password or "")
+            page_count = len(doc_fitz)
+            doc_fitz.close()
+        except Exception:
+            pass
+
+        return {
+            "transactions": augmented,
+            "page_count": page_count,
+            "parser_type": preferred_parser,
+        }
+
+    except Exception as exc:
+        logger.error("pdf-map error for doc %s: %s", document_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF mapping failed: {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF Page Image  — renders one PDF page as a base64 PNG
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{document_id}/pdf-page/{page}")
+async def get_pdf_page_image(document_id: int, page: int, user=Depends(get_current_user)):
+    """
+    Renders a single PDF page as a base64-encoded PNG image at 150 DPI.
+    page is 1-indexed.
+    Password-protected PDFs are handled automatically.
+    """
+    user_id = user["user_id"]
+    sb = get_client()
+
+    # 1. Fetch document
+    doc_result = (
+        sb.table("documents")
+        .select("document_id, file_path, is_password_protected")
+        .eq("document_id", document_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not doc_result.data:
+        raise HTTPException(status_code=404, detail="Document not found")
+    doc = doc_result.data
+
+    # 2. Fetch password
+    password = None
+    if doc.get("is_password_protected"):
+        pw_result = (
+            sb.table("document_password")
+            .select("encrypted_password")
+            .eq("document_id", document_id)
+            .maybe_single()
+            .execute()
+        )
+        if pw_result.data:
+            password = pw_result.data.get("encrypted_password")
+
+    storage_path = doc["file_path"]
+    tmp_path = None
+    try:
+        import fitz
+
+        pdf_bytes = sb.storage.from_(SUPABASE_STORAGE_BUCKET).download(storage_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+
+        doc_fitz = fitz.open(tmp_path)
+        if doc_fitz.is_encrypted:
+            doc_fitz.authenticate(password or "")
+
+        page_idx = page - 1  # convert to 0-indexed
+        if page_idx < 0 or page_idx >= len(doc_fitz):
+            raise HTTPException(status_code=400, detail=f"Page {page} out of range (1–{len(doc_fitz)})")
+
+        fitz_page = doc_fitz[page_idx]
+        # Render at 300 DPI (matrix scale = 300/72 ≈ 4.16)
+        matrix = fitz.Matrix(300 / 72, 300 / 72)
+        pix = fitz_page.get_pixmap(matrix=matrix, alpha=False)
+        png_bytes = pix.tobytes("png")
+        doc_fitz.close()
+
+        b64 = base64.b64encode(png_bytes).decode("utf-8")
+        return {
+            "page": page,
+            "width": pix.width,
+            "height": pix.height,
+            "image_b64": b64,
+        }
+
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PyMuPDF not installed — cannot render PDF pages.")
+    except Exception as exc:
+        logger.error("pdf-page error for doc %s page %s: %s", document_id, page, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Page render failed: {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass

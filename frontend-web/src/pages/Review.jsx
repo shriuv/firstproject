@@ -1,10 +1,33 @@
 import { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Check, Code, FileSearch, Building2, Cpu, Loader2, ChevronLeft, CheckCircle, Download, Link, ScrollText, Trash2, Plus, Minus, RotateCcw, AlertCircle, Info, X, Building, CreditCard, ChevronDown } from "lucide-react";
+import { Check, Code, FileSearch, Building2, Cpu, Loader2, ChevronLeft, ChevronRight, CheckCircle, Download, Link, ScrollText, Trash2, Plus, Minus, RotateCcw, AlertCircle, Info, X, Building, CreditCard, ChevronDown, List, Maximize2, Minimize2, Expand } from "lucide-react";
 // import API from "../api/api";
 import API from "../api/api";
 import { useParsing } from "../context/ParsingContext";
+import PDFViewer from "../components/PDFViewer";
+
+// Syntax highlighting helper for JSON
+const syntaxHighlight = (json) => {
+    if (!json) return "";
+    let str = JSON.stringify(json, null, 2);
+    str = str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<div class="json-highlight">${str.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+        let cls = 'number';
+        if (/^"/.test(match)) {
+            if (/:$/.test(match)) {
+                cls = 'key';
+            } else {
+                cls = 'string';
+            }
+        } else if (/true|false/.test(match)) {
+            cls = 'boolean';
+        } else if (/null/.test(match)) {
+            cls = 'null';
+        }
+        return `<span class="${cls}">${match}</span>`;
+    })}</div>`;
+};
 
 // Generic field editor for Date, Details, Balance
 const FieldEditor = ({ value, type, onSave, onCancel }) => {
@@ -137,6 +160,8 @@ export default function ReviewPage() {
     const [editableLlmTxns, setEditableLlmTxns] = useState([]);
     const [selectedIndices, setSelectedIndices] = useState({ CODE: [], LLM: [] });
     const [activeParser, setActiveParser] = useState("CODE"); 
+    const [currentPage, setCurrentPage] = useState(1);
+    const rowsPerPage = 15;
     const [editingCell, setEditingCell] = useState(null); // { parser, index, field }
     const [isRetryModalOpen, setIsRetryModalOpen] = useState(false);
     const [retryMethod, setRetryMethod] = useState("CODE"); // CODE, VISION, MANUAL
@@ -156,6 +181,16 @@ export default function ReviewPage() {
         ifsc_code: '',
         card_network: 'VISA'
     });
+
+    // PDF Viewer state
+    const [pdfMapData, setPdfMapData] = useState([]);
+    const [pdfPageCount, setPdfPageCount] = useState(0);
+    const [pdfLoading, setPdfLoading] = useState(false);
+    const [pdfHighlightIndex, setPdfHighlightIndex] = useState(null);
+    const [pdfHoverIndex, setPdfHoverIndex] = useState(null);
+    const [tablePdfHighlight, setTablePdfHighlight] = useState(null);
+    const [activeView, setActiveView] = useState("extracted"); // "extracted" or "json"
+    const [isFullscreen, setIsFullscreen] = useState(false); // fullscreen transactions view
 
     const fetchReviewData = async () => {
         if (!documentId) return;
@@ -198,6 +233,52 @@ export default function ReviewPage() {
         fetchReviewData();
     }, [documentId]);
 
+    useEffect(() => {
+        setEditingCell(null);
+        setCurrentPage(1);
+    }, [activeParser]);
+
+    // Fetch PDF map (rubber-binding bboxes) — runs once after documentId is known
+    useEffect(() => {
+        if (!documentId) return;
+        setPdfLoading(true);
+        API.get(`/documents/${documentId}/pdf-map`)
+            .then(res => {
+                setPdfMapData(res.data.transactions || []);
+                setPdfPageCount(res.data.page_count || 0);
+            })
+            .catch(err => console.error('PDF map load error:', err))
+            .finally(() => setPdfLoading(false));
+    }, [documentId]);
+
+    // Find matching index in pdfMapData by date+amount
+    const findPdfMapIndex = (txn) => {
+        if (!pdfMapData || !pdfMapData.length) return null;
+        const date = String(txn.date || txn.txn_date || '');
+        const amount = parseFloat(txn.debit || txn.credit || 0);
+        for (let j = 0; j < pdfMapData.length; j++) {
+            const pt = pdfMapData[j];
+            if (!pt.bbox) continue;
+            const pdfDate = String(pt.date || pt.txn_date || '');
+            const pdfAmt  = parseFloat(pt.debit || pt.credit || 0);
+            if (pdfDate === date && Math.abs(pdfAmt - amount) < 0.05) return j;
+        }
+        return null;
+    };
+
+    // Find matching table-row index by date+amount
+    const findTableIndex = (pdfTxn, parserType) => {
+        const txns = parserType === 'CODE' ? editableCodeTxns : editableLlmTxns;
+        const date  = String(pdfTxn.date || pdfTxn.txn_date || '');
+        const amount = parseFloat(pdfTxn.debit || pdfTxn.credit || 0);
+        for (let k = 0; k < txns.length; k++) {
+            const t = txns[k];
+            const tAmt = parseFloat(t.debit || t.credit || 0);
+            if (String(t.date || t.txn_date || '') === date && Math.abs(tAmt - amount) < 0.05) return k;
+        }
+        return null;
+    };
+
     const handleApprove = async () => {
         if (!accountLinked) { alert("Please link an account before approving."); return; }
         const txnsToUse = activeParser === "CODE" ? editableCodeTxns : editableLlmTxns;
@@ -208,6 +289,7 @@ export default function ReviewPage() {
         try {
             await API.post(`/documents/${documentId}/approve`, { transactions: selectedTxns, parser_type: activeParser });
             setIsApproved(true);
+            setData(prev => prev ? { ...prev, status: "APPROVE" } : prev);
         } catch (err) {
             console.error(err);
             alert("Approval failed: " + (err.response?.data?.detail || err.message));
@@ -347,12 +429,22 @@ export default function ReviewPage() {
         });
     };
 
-    const toggleSelectAll = (parserType) => {
+    const toggleSelectAll = (parserType, onlyIndices = null) => {
         const txns = parserType === "CODE" ? editableCodeTxns : editableLlmTxns;
         setSelectedIndices(prev => {
-            const nonDuplicates = txns.map((t, i) => t.is_duplicate ? null : i).filter(v => v !== null);
-            const isAllSelected = nonDuplicates.length > 0 && nonDuplicates.every(idx => prev[parserType].includes(idx));
-            return { ...prev, [parserType]: isAllSelected ? [] : nonDuplicates };
+            const targets = onlyIndices || txns.map((t, i) => t.is_duplicate ? null : i).filter(v => v !== null);
+            const isAllSelected = targets.length > 0 && targets.every(idx => prev[parserType].includes(idx));
+            
+            let newSelected = [...prev[parserType]];
+            if (isAllSelected) {
+                // Deselect only targets
+                newSelected = newSelected.filter(idx => !targets.includes(idx));
+            } else {
+                // Select all targets (avoiding duplicates)
+                const toAdd = targets.filter(idx => !newSelected.includes(idx));
+                newSelected = [...newSelected, ...toAdd];
+            }
+            return { ...prev, [parserType]: newSelected };
         });
     };
 
@@ -410,7 +502,14 @@ export default function ReviewPage() {
     const renderTransactionTable = (transactions, title, icon, parserType) => {
         const isActive = activeParser === parserType;
         const currentSelected = selectedIndices[parserType] || [];
-        const isAllSelected = transactions.length > 0 && currentSelected.length === transactions.length;
+        // Pagination Logic
+        const totalPages = Math.ceil(transactions.length / rowsPerPage);
+        const startIndex = (currentPage - 1) * rowsPerPage;
+        const pagedTransactions = transactions.slice(startIndex, startIndex + rowsPerPage);
+        
+        // Check if all rows on CURRENT page are selected
+        const pagedIndices = pagedTransactions.map((_, i) => startIndex + i);
+        const isAllSelected = pagedIndices.length > 0 && pagedIndices.every(idx => currentSelected.includes(idx));
 
         return (
             <div style={{
@@ -418,15 +517,67 @@ export default function ReviewPage() {
                 borderRadius: '16px',
                 border: isActive ? '2px solid var(--primary-action)' : '1px solid var(--border-color)',
                 overflow: 'hidden',
-                marginBottom: '1.5rem',
                 opacity: isActive ? 1 : 0.7,
                 transition: 'all 0.3s ease',
                 position: 'relative'
             }}>
+                {/* ── Fullscreen button ── absolute top-right of card */}
+                <div
+                    style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 10 }}
+                    onMouseEnter={e => { const t = e.currentTarget.querySelector('.fs-tip'); if(t) t.style.opacity='1'; }}
+                    onMouseLeave={e => { const t = e.currentTarget.querySelector('.fs-tip'); if(t) t.style.opacity='0'; }}
+                >
+                    <button
+                        onClick={(e) => { e.stopPropagation(); setIsFullscreen(true); }}
+                        style={{
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border-color)',
+                            borderRadius: '6px',
+                            padding: '4px 6px',
+                            cursor: 'pointer',
+                            color: 'var(--text-secondary)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            transition: 'color 0.15s, border-color 0.15s',
+                        }}
+                    >
+                        <Expand size={14} />
+                    </button>
+                    <div className="fs-tip" style={{
+                        position: 'absolute',
+                        top: 'calc(100% + 6px)',
+                        right: 0,
+                        background: '#111',
+                        color: '#fff',
+                        fontSize: '0.7rem',
+                        fontWeight: 600,
+                        padding: '4px 9px',
+                        borderRadius: '6px',
+                        whiteSpace: 'nowrap',
+                        opacity: 0,
+                        transition: 'opacity 0.15s',
+                        pointerEvents: 'none',
+                        zIndex: 100,
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                    }}>
+                        View fullscreen
+                        <div style={{ 
+                            position: 'absolute', 
+                            top: '-4px', 
+                            right: '10px', 
+                            width: 0, 
+                            height: 0, 
+                            borderLeft: '4px solid transparent', 
+                            borderRight: '4px solid transparent', 
+                            borderBottom: '4px solid #111' 
+                        }} />
+                    </div>
+                </div>
+
                 <div 
                     onClick={() => !isApproved && setActiveParser(parserType)}
                     style={{
-                        padding: '1.25rem 1.5rem',
+                        padding: '0.75rem 1rem',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'space-between',
@@ -444,53 +595,103 @@ export default function ReviewPage() {
                         }}>
                             {isActive && <Check size={12} color="white" />}
                         </div>
-                        <h3 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            {icon} {title}
+                        <h3 style={{ fontSize: '0.85rem', fontWeight: 400, margin: 0, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            {title}
                         </h3>
                         <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', background: 'rgba(0,0,0,0.05)', padding: '2px 8px', borderRadius: '10px' }}>
                             {transactions.length} rows
                         </span>
                     </div>
-                </div>
+
+                    {totalPages > 1 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                Page <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>{currentPage}</span> of {totalPages}
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                <button 
+                                    disabled={currentPage === 1}
+                                    onClick={(e) => { e.stopPropagation(); setCurrentPage(p => Math.max(1, p - 1)); }}
+                                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: currentPage === 1 ? 'not-allowed' : 'pointer', opacity: currentPage === 1 ? 0.5 : 1 }}
+                                >
+                                    <ChevronLeft size={14} />
+                                </button>
+                                <button 
+                                    disabled={currentPage === totalPages}
+                                    onClick={(e) => { e.stopPropagation(); setCurrentPage(p => Math.min(totalPages, p + 1)); }}
+                                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: currentPage === totalPages ? 'not-allowed' : 'pointer', opacity: currentPage === totalPages ? 0.5 : 1 }}
+                                >
+                                    <ChevronRight size={14} />
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    </div>
 
                 <div id="review-table" style={{ overflowX: 'auto' }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                         <thead>
                             <tr style={{ background: 'var(--bg-secondary)' }}>
                                 <th style={{ width: '40px', padding: '1rem', textAlign: 'center' }}>
-                                    <input type="checkbox" checked={isAllSelected} onChange={() => !isApproved && toggleSelectAll(parserType)} disabled={isApproved} />
+                                    <input 
+                                        type="checkbox" 
+                                        checked={isAllSelected} 
+                                        onChange={() => !isApproved && toggleSelectAll(parserType, pagedIndices)} 
+                                        disabled={isApproved} 
+                                        style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+                                    />
                                 </th>
-                                <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', width: '130px' }}>Date</th>
-                                <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Details</th>
-                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', width: '120px' }}>Debit</th>
-                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', width: '120px' }}>Credit</th>
-                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', width: '130px' }}>Balance</th>
-                                <th style={{ padding: '1rem', textAlign: 'center', fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', width: '100px' }}>Confidence</th>
+                                <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '130px', letterSpacing: '0.05em' }}>Date</th>
+                                <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Details</th>
+                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '110px', letterSpacing: '0.05em' }}>Debit</th>
+                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '110px', letterSpacing: '0.05em' }}>Credit</th>
+                                <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '120px', letterSpacing: '0.05em' }}>Balance</th>
+                                <th style={{ padding: '1rem', textAlign: 'center', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '90px', letterSpacing: '0.05em' }}>Match</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {transactions && transactions.length > 0 ? transactions.map((tx, i) => {
-                                const isSelected = currentSelected.includes(i);
+                            {pagedTransactions && pagedTransactions.length > 0 ? pagedTransactions.map((tx, i) => {
+                                const realIndex = startIndex + i;
+                                const isSelected = currentSelected.includes(realIndex);
                                 const isDebit = (tx.debit || 0) > 0;
                                 const amount = isDebit ? tx.debit : tx.credit;
+                                const isActiveRow = isActive && tablePdfHighlight === realIndex;
 
                                 return (
                                     <tr 
-                                        key={i} 
+                                        key={realIndex}
+                                        id={`txn-row-${parserType}-${realIndex}`}
+                                        onClick={() => {
+                                            if (isActive && !tx.is_duplicate) {
+                                                const pdfIdx = findPdfMapIndex(tx);
+                                                setPdfHighlightIndex(pdfIdx !== null ? pdfIdx : realIndex);
+                                                setTablePdfHighlight(realIndex);
+                                            }
+                                        }}
                                         style={{ 
-                                            borderTop: '1px solid var(--border-color)', 
-                                            background: tx.is_duplicate ? 'rgba(43, 67, 102, 0.12)' : (isSelected ? 'rgba(72, 62, 168, 0.02)' : 'transparent'),
-                                            borderLeft: tx.is_duplicate ? '4px solid #2B4366' : '4px solid transparent',
+                                            borderBottom: '1px solid #f1f5f9',
+                                            background: tx.is_duplicate
+                                                ? '#fef2f2'
+                                                : isActiveRow
+                                                    ? '#FDFFB4'
+                                                    : (isSelected ? '#f8fafc' : 'transparent'),
+                                            borderLeft: tx.is_duplicate
+                                                ? '4px solid #ef4444'
+                                                : isActiveRow
+                                                    ? '4px solid #FDE047'
+                                                    : '4px solid transparent',
                                             position: 'relative',
-                                            transition: 'background 0.2s ease'
+                                            transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                                            cursor: isActive && !tx.is_duplicate ? 'pointer' : 'default',
                                         }}
                                     >
-                                        <td style={{ textAlign: 'center', padding: '0.5rem' }}>
+                                        <td style={{ textAlign: 'center', padding: '0.75rem' }}>
                                             <input 
                                                 type="checkbox" 
                                                 checked={isSelected} 
-                                                onChange={() => !isApproved && !tx.is_duplicate && toggleSelection(parserType, i)} 
-                                                disabled={isApproved || tx.is_duplicate} 
+                                                onChange={() => !isApproved && !tx.is_duplicate && toggleSelection(parserType, realIndex)} 
+                                                disabled={isApproved || tx.is_duplicate}
+                                                style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
                                             />
                                         </td>
                                         
@@ -608,11 +809,11 @@ export default function ReviewPage() {
                                             )}
                                         </td>
 
-                                        <td style={{ padding: '0.5rem', textAlign: 'center' }}>
+                                        <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
                                             <span style={{ 
-                                                background: tx.confidence >= 0.9 ? '#def7ec' : tx.confidence >= 0.7 ? '#fef3c7' : '#fde8e8',
-                                                color: tx.confidence >= 0.9 ? '#03543f' : tx.confidence >= 0.7 ? '#92400e' : '#9b1c1c',
-                                                padding: '2px 6px', borderRadius: '50px', fontSize: '0.65rem', fontWeight: 700 
+                                                background: tx.confidence >= 0.9 ? '#ecfdf5' : tx.confidence >= 0.7 ? '#fffbeb' : '#fef2f2',
+                                                color: tx.confidence >= 0.9 ? '#059669' : tx.confidence >= 0.7 ? '#d97706' : '#dc2626',
+                                                padding: '4px 10px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 800, border: '1px solid currentColor'
                                             }}>
                                                 {tx.confidence != null ? (tx.confidence * 100).toFixed(0) + '%' : 'N/A'}
                                             </span>
@@ -627,19 +828,17 @@ export default function ReviewPage() {
                 </div>
 
                 {!isApproved && (
-                    <div style={{ padding: '1rem', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'center', background: isActive ? 'rgba(72, 62, 168, 0.02)' : 'transparent' }}>
-                        <button id={`review-add-txn-${parserType}`} onClick={() => handleAddTxn(parserType)} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '0.5rem 1.25rem', background: 'none', border: '1.5px dashed var(--primary-action)', borderRadius: '8px', color: 'var(--primary-action)', fontSize: '0.85rem', fontWeight: 700, cursor: 'pointer' }}>
-                            <Plus size={16} /> Add Missing Transaction
-                        </button>
+                    <div style={{ padding: '0.5rem', borderTop: '1px solid var(--border-color)', background: isActive ? 'rgba(72, 62, 168, 0.02)' : 'transparent' }}>
+                        {/* Footer space */}
                     </div>
                 )}
                 
                 <style dangerouslySetInnerHTML={{ __html: `
-                    .table-input { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 0.85rem; color: var(--text-primary); transition: all 0.2s; }
+                    .table-input { background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 4px 8px; font-family: inherit; font-size: 0.8rem; color: var(--text-primary); transition: all 0.2; }
                     .table-input:hover:not(:disabled) { border-color: var(--border-color); background: var(--bg-secondary); }
                     .table-input:focus:not(:disabled) { border-color: var(--primary-action); background: var(--bg-primary); outline: none; box-shadow: 0 0 0 2px rgba(72, 62, 168, 0.1); }
                     
-                    .amount-cell-review { position: relative; border-radius: 6px; padding: 4px 8px; transition: background 0.15s; user-select: none; min-height: 32px; display: flex; align-items: center; }
+                    .amount-cell-review { position: relative; border-radius: 6px; padding: 4px 8px; transition: background 0.15s; user-select: none; min-height: 28px; display: flex; align-items: center; font-size: 0.8rem; }
                     .amount-cell-review:hover:not(:disabled) { background: rgba(255, 255, 255, 0.04); }
                     
                     .amount-edit-hint { position: absolute; top: -2px; right: -2px; font-size: 11px; opacity: 0; color: var(--text-secondary); transition: opacity 0.15s; }
@@ -659,6 +858,122 @@ export default function ReviewPage() {
                     .amount-editor-cancel { background: transparent; color: var(--text-secondary); }
                     .amount-editor-cancel:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); }
                 `}} />
+
+                {/* ── Fullscreen Modal ─────────────────────────────── */}
+                {isFullscreen && (
+                    <div style={{
+                        position: 'fixed', inset: 0,
+                        background: 'var(--bg-primary)',
+                        zIndex: 9999,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        overflow: 'hidden',
+                    }}>
+                        {/* Fullscreen header */}
+                        <div style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            padding: '1rem 1.5rem',
+                            borderBottom: '1px solid var(--border-color)',
+                            background: 'var(--bg-secondary)',
+                            flexShrink: 0,
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <h2 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>
+                                    Transactions
+                                </h2>
+                                <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', background: 'rgba(0,0,0,0.05)', padding: '2px 8px', borderRadius: '10px' }}>
+                                    {transactions.length} rows
+                                </span>
+                            </div>
+                            <button
+                                onClick={() => setIsFullscreen(false)}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                                    background: 'none', border: '1px solid var(--border-color)',
+                                    borderRadius: '8px', padding: '6px 12px',
+                                    cursor: 'pointer', color: 'var(--text-secondary)',
+                                    fontSize: '0.8rem', fontWeight: 600,
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                <Minimize2 size={14} /> Exit Fullscreen
+                            </button>
+                        </div>
+
+                        {/* Fullscreen table */}
+                        <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                <thead style={{ position: 'sticky', top: 0, zIndex: 10 }}>
+                                    <tr style={{ background: 'var(--bg-secondary)' }}>
+                                        <th style={{ width: '40px', padding: '1rem', textAlign: 'center' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={pagedIndices.length > 0 && pagedIndices.every(idx => currentSelected.includes(idx))}
+                                                onChange={() => !isApproved && toggleSelectAll(parserType, pagedIndices)}
+                                                disabled={isApproved}
+                                                style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+                                            />
+                                        </th>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '130px', letterSpacing: '0.05em' }}>Date</th>
+                                        <th style={{ padding: '1rem', textAlign: 'left', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Details</th>
+                                        <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '110px', letterSpacing: '0.05em' }}>Debit</th>
+                                        <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '110px', letterSpacing: '0.05em' }}>Credit</th>
+                                        <th style={{ padding: '1rem', textAlign: 'right', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '120px', letterSpacing: '0.05em' }}>Balance</th>
+                                        <th style={{ padding: '1rem', textAlign: 'center', fontSize: '0.65rem', fontWeight: 600, color: '#64748b', textTransform: 'uppercase', width: '90px', letterSpacing: '0.05em' }}>Match</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {transactions.map((tx, i) => {
+                                        const isSelected = currentSelected.includes(i);
+                                        const isDebit = (tx.debit || 0) > 0;
+                                        return (
+                                            <tr key={i} style={{
+                                                borderBottom: '1px solid #f1f5f9',
+                                                background: tx.is_duplicate ? '#fef2f2' : isSelected ? '#f8fafc' : 'transparent',
+                                                borderLeft: tx.is_duplicate ? '4px solid #ef4444' : '4px solid transparent',
+                                            }}>
+                                                <td style={{ textAlign: 'center', padding: '0.75rem' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isSelected}
+                                                        onChange={() => !isApproved && !tx.is_duplicate && toggleSelection(parserType, i)}
+                                                        disabled={isApproved || tx.is_duplicate}
+                                                        style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: 'var(--accent-color)' }}
+                                                    />
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 500 }}>
+                                                    {tx.date || tx.txn_date || '—'}
+                                                    {tx.is_duplicate && <span style={{ display: 'block', fontSize: '10px', fontWeight: 800, background: '#2B4366', color: 'white', padding: '2px 6px', borderRadius: '4px', marginTop: '4px', letterSpacing: '0.5px' }}>DUPLICATE</span>}
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', fontSize: '0.8rem', color: 'var(--text-primary)', maxWidth: '400px' }}>
+                                                    {tx.details || tx.description || '—'}
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: (tx.debit || 0) > 0 ? '#ef4444' : 'var(--text-secondary)' }}>
+                                                    {(tx.debit || 0) > 0 ? `— ₹${tx.debit}` : '—'}
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: (tx.credit || 0) > 0 ? '#10b981' : 'var(--text-secondary)' }}>
+                                                    {(tx.credit || 0) > 0 ? `+ ₹${tx.credit}` : '—'}
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', textAlign: 'right', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                    {tx.balance != null ? `₹${tx.balance}` : '—'}
+                                                </td>
+                                                <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
+                                                    <span style={{
+                                                        background: tx.confidence >= 0.9 ? '#ecfdf5' : tx.confidence >= 0.7 ? '#fffbeb' : '#fef2f2',
+                                                        color: tx.confidence >= 0.9 ? '#059669' : tx.confidence >= 0.7 ? '#d97706' : '#dc2626',
+                                                        padding: '4px 10px', borderRadius: '8px', fontSize: '0.7rem', fontWeight: 800, border: '1px solid currentColor'
+                                                    }}>
+                                                        {tx.confidence != null ? (tx.confidence * 100).toFixed(0) + '%' : 'N/A'}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                )}
             </div>
         );
     };
@@ -667,431 +982,251 @@ export default function ReviewPage() {
         <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            style={{ maxWidth: '1400px', margin: '0 auto' }}
+            style={{ 
+                maxWidth: '1440px', 
+                margin: '0 auto', 
+                padding: '1.5rem', 
+                minHeight: '100vh',
+                background: 'var(--bg-primary)',
+                fontFamily: "'Outfit', sans-serif"
+            }}
         >
-            <div style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-                <div>
+            {/* Compact Header with Stats */}
+            <div style={{ position: 'sticky', top: 0, zIndex: 50, display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', background: 'var(--bg-primary)', padding: '1rem 0', borderBottom: '1px solid var(--border-color)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
                     <button
                         onClick={() => navigate(-1)}
                         style={{
-                            background: 'none',
-                            border: 'none',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            fontSize: '0.875rem',
-                            color: 'var(--text-secondary)',
-                            cursor: 'pointer',
-                            fontWeight: 600,
-                            marginBottom: '0.75rem',
-                            padding: 0,
+                            padding: '8px 16px', borderRadius: '10px', border: '1px solid var(--border-color)', background: 'white', color: 'var(--text-primary)', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s'
                         }}
+                        onMouseEnter={(e) => e.currentTarget.style.background = '#f1f5f9'}
+                        onMouseLeave={(e) => e.currentTarget.style.background = 'white'}
                     >
-                        <ChevronLeft size={16} /> Back to Dashboard
+                        <ChevronLeft size={16} /> Back
                     </button>
-                    <h2 id="review-title" style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>Review & Approve</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <h1 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text-primary)', margin: 0, letterSpacing: '-0.2px' }}>
+                            {data?.file_name?.split('/').pop() || 'Review Document'}
+                        </h1>
+                    </div>
                 </div>
-                
-                <div id="review-header-actions" style={{ display: 'flex', gap: '0.75rem' }}>
-                    <button
-                        onClick={handleDownloadJson}
-                        style={{
-                            padding: '0.6rem 1.5rem',
-                            background: 'none',
-                            color: 'var(--primary-action)',
-                            border: '2px solid var(--primary-action)',
-                            borderRadius: '10px',
-                            fontWeight: 700,
-                            fontSize: '0.85rem',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s'
-                        }}
-                    >
-                        <Download size={15} /> Export Selected
-                    </button>
 
-                    {isApproved ? (
-                        <div style={{
-                            padding: '0.6rem 2rem',
-                            background: 'var(--accent-color)',
-                            color: 'white',
-                            borderRadius: '10px',
-                            fontWeight: 700,
-                            fontSize: '0.85rem',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '8px',
-                            boxShadow: '0 4px 12px rgba(127, 175, 138, 0.2)'
-                        }}>
-                            <CheckCircle size={16} /> APPROVED
+                <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
+                    {[
+                        { label: 'Transactions', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).length, color: 'var(--primary-action)' },
+                        { label: 'Credits', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => (t.credit || 0) > 0).length, color: '#059669' },
+                        { label: 'Debits', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => (t.debit || 0) > 0).length, color: '#e11d48' }
+                    ].map((stat, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{stat.label}</div>
+                            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: stat.color }}>{stat.value}</div>
                         </div>
-                    ) : (
-                        <button
-                            id="review-approve-btn"
-                            onClick={handleApprove}
-                            disabled={isApproving || !accountLinked}
-                            style={{
-                                padding: '0.6rem 2.5rem',
-                                background: (!accountLinked || isApproving) ? '#e5e7eb' : 'var(--primary-action)',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '10px',
-                                fontWeight: 800,
-                                fontSize: '0.9rem',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '8px',
-                                cursor: (isApproving || !accountLinked) ? 'not-allowed' : 'pointer',
-                                transition: 'all 0.2s',
-                                boxShadow: (!accountLinked || isApproving) ? 'none' : '0 4px 12px rgba(72, 62, 168, 0.3)'
-                            }}
-                        >
-                            {isApproving ? (
-                                <><Loader2 size={16} className="spin-icon" /> PROCESSING...</>
-                            ) : (
-                                <><Check size={18} /> APPROVE SELECTED ({selectedIndices[activeParser]?.length || 0})</>
-                            )}
-                        </button>
-                    )}
+                    ))}
                 </div>
             </div>
 
-            {/* Deduplication Info Callout */}
-            {!isApproved && data?.duplicates_count > 0 && (
-                <div style={{
-                    background: 'rgba(72, 62, 168, 0.05)',
-                    border: '1px solid rgba(72, 62, 168, 0.2)',
-                    borderRadius: '12px',
-                    padding: '0.75rem 1.25rem',
-                    marginBottom: '1rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '0.75rem',
-                    color: 'var(--primary-action)',
-                    fontSize: '0.875rem',
-                    fontWeight: 600
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                        <Link size={20} />
-                        <span>Deduplication: We found <b>{data.duplicates_count} transactions</b> that were already imported in previous uploads. They've been auto-deselected for your review.</span>
-                    </div>
-                </div>
-            )}
+            {/* Main 50-50 Split Layout */}
+            <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
+                {/* Left Column: PDF Viewer (Strict 50%) */}
+                <div style={{ width: 'calc(50% - 0.5rem)', position: 'sticky', top: '6rem', height: 'calc(100vh - 120px)' }}>
+                    <PDFViewer
+                        documentId={documentId ? parseInt(documentId) : null}
+                        transactions={pdfMapData}
+                        pageCount={pdfPageCount}
+                        selectedTxnIndex={pdfHighlightIndex}
+                        onSelectTxn={(pdfIdx) => {
+                            setPdfHighlightIndex(pdfIdx);
+                            const pdfTxn = pdfMapData[pdfIdx];
+                            if (!pdfTxn) return;
+                            const tableIdx = findTableIndex(pdfTxn, activeParser);
+                            const finalIdx = tableIdx !== null ? tableIdx : pdfIdx;
+                            setTablePdfHighlight(finalIdx);
+                            
+                            // Change table pagination page if necessary
+                            const requiredPage = Math.floor(finalIdx / rowsPerPage) + 1;
+                            setCurrentPage(requiredPage);
 
-            {/* Quick Stats Summary Section */}
-            <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-                gap: '1.25rem',
-                marginBottom: '2rem'
-            }}>
-                {/* Card 1: Total */}
-                <div className="stats-card">
-                    <div className="stats-icon" style={{ background: 'rgba(72, 62, 168, 0.1)', color: 'var(--primary-action)' }}>
-                        <ScrollText size={24} />
-                    </div>
-                    <div>
-                        <div className="stats-label">Total Transactions</div>
-                        <div className="stats-value">{(activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).length}</div>
-                    </div>
+                            setTimeout(() => {
+                                const el = document.getElementById(`txn-row-${activeParser}-${finalIdx}`);
+                                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            }, 50);
+                        }}
+                        hoveredTxnIndex={pdfHoverIndex}
+                        onHoverTxn={setPdfHoverIndex}
+                        hidePageCount={true}
+                    />
                 </div>
 
-                {/* Card 2: Credits */}
-                <div className="stats-card">
-                    <div className="stats-icon" style={{ background: '#def7ec', color: '#03543f' }}>
-                        <Plus size={24} />
-                    </div>
-                    <div>
-                        <div className="stats-label">Number of Credits (+)</div>
-                        <div className="stats-value" style={{ color: '#03543f' }}>
-                            {(activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => t.credit > 0).length}
+                {/* Right Column: Control Panel (Strict 50%) */}
+                <div style={{ width: 'calc(50% - 0.5rem)', display: 'flex', flexDirection: 'column', gap: '0.75rem', background: 'white', padding: '1rem', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+                    
+                    {/* Header: Clean & Unobtrusive */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <h2 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            Extraction Results
+                        </h2>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <button 
+                                onClick={handleDownloadJson}
+                                title="Export extracted data as a JSON file"
+                                style={{ padding: '8px 12px', borderRadius: '8px', background: 'white', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.background = '#f8fafc'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; e.currentTarget.style.transform = 'translateY(0)'; }}
+                            >
+                                <Download size={14} /> Export JSON
+                            </button>
+                            <button 
+                                onClick={handleApprove}
+                                disabled={isApproving || isApproved}
+                                style={{ 
+                                    padding: '8px 20px', 
+                                    borderRadius: '8px', 
+                                    background: isApproved ? '#ecfdf5' : 'var(--primary-action)', 
+                                    color: isApproved ? '#059669' : 'white', 
+                                    border: 'none', 
+                                    fontSize: '0.8rem', 
+                                    fontWeight: 700, 
+                                    cursor: (isApproving || isApproved) ? 'not-allowed' : 'pointer', 
+                                    display: 'flex', 
+                                    alignItems: 'center', 
+                                    gap: '8px', 
+                                    transition: 'all 0.2s',
+                                    boxShadow: isApproved ? 'none' : '0 4px 12px rgba(72, 62, 168, 0.25)'
+                                }}
+                                onMouseEnter={(e) => { if(!isApproved && !isApproving) { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 16px rgba(72, 62, 168, 0.35)'; } }}
+                                onMouseLeave={(e) => { if(!isApproved && !isApproving) { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(72, 62, 168, 0.25)'; } }}
+                            >
+                                {isApproving ? <Loader2 size={14} className="spin-icon" /> : <Check size={14} />}
+                                {isApproved ? 'Approved' : `Approve All`}
+                            </button>
                         </div>
                     </div>
-                </div>
 
-                {/* Card 3: Debits */}
-                <div className="stats-card">
-                    <div className="stats-icon" style={{ background: '#fdf2f2', color: '#9b1c1c' }}>
-                        <Minus size={24} /> 
-                    </div>
-                    <div>
-                        <div className="stats-label">Number of Debits (-)</div>
-                        <div className="stats-value" style={{ color: '#9b1c1c' }}>
-                            {(activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => t.debit > 0).length}
+                    {/* Document Info - Subtle Contrast */}
+                    <div style={{ background: '#f8fafc', padding: '0.5rem 0.75rem', borderRadius: '16px', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                            <div>
+                                <div style={{ fontSize: '0.65rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.025em' }}>Bank Name</div>
+                                <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b' }}>{data?.bank_name || 'N/A'}</div>
+                            </div>
+                            <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: '0.65rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.025em' }}>Statement Type</div>
+                                <span style={{ background: 'white', border: '1px solid #e2e8f0', color: 'var(--primary-action)', padding: '3px 10px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700, boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                                    {data?.identifier_json?.document_family || 'N/A'}
+                                </span>
+                            </div>
                         </div>
                     </div>
-                </div>
 
-                <style dangerouslySetInnerHTML={{ __html: `
-                    .stats-card {
-                        background: white;
-                        border: 1px solid var(--border-color);
-                        border-radius: 16px;
-                        padding: 1.25rem 1.5rem;
-                        display: flex;
-                        align-items: center;
-                        gap: 1.25rem;
-                        box-shadow: 0 4px 12px rgba(0,0,0,0.03);
-                        transition: transform 0.2s, box-shadow 0.2s;
-                    }
-                    .stats-card:hover {
-                        transform: translateY(-2px);
-                        box-shadow: 0 8px 20px rgba(0,0,0,0.06);
-                    }
-                    .stats-icon {
-                        width: 56px;
-                        height: 56px;
-                        border-radius: 14px;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        flex-shrink: 0;
-                    }
-                    .stats-label {
-                        font-size: 0.75rem;
-                        font-weight: 700;
-                        color: var(--text-secondary);
-                        text-transform: uppercase;
-                        letter-spacing: 0.5px;
-                        margin-bottom: 4px;
-                    }
-                    .stats-value {
-                        font-size: 1.5rem;
-                        font-weight: 800;
-                        color: var(--text-primary);
-                    }
-                `}} />
-            </div>
-
-            {/* Metadata bar */}
-            <div style={{
-                background: 'var(--card-bg)',
-                borderRadius: '16px',
-                border: '1px solid var(--border-color)',
-                display: 'flex',
-                flexWrap: 'wrap',
-                alignItems: 'center',
-                gap: '2.5rem',
-                marginBottom: '1.5rem',
-                padding: '1.5rem 2rem'
-            }}>
-                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '4px', textTransform: 'uppercase' }}>
-                        <Building2 size={12} /> Institution
-                    </label>
-                    <span style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--text-primary)' }}>{data.bank_name}</span>
-                </div>
-
-                <div id="review-link-account" style={{ flex: 1, minWidth: '300px' }}>
-                    <label style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '8px', textTransform: 'uppercase' }}>
-                        <Link size={12} /> Target Account for Transactions
-                    </label>
-                    <div style={{ display: 'flex', gap: '0.75rem', position: 'relative' }} ref={accountDropdownRef}>
-                        <div 
-                            onClick={() => !isApproved && setIsAccountDropdownOpen(!isAccountDropdownOpen)}
-                            style={{
-                                flex: 1,
-                                padding: '0.6rem 1rem',
-                                fontSize: '0.85rem',
-                                fontWeight: 700,
-                                color: selectedAccountId ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                border: '1.5px solid var(--border-color)',
-                                borderRadius: '10px',
-                                background: 'var(--input-bg)',
-                                cursor: isApproved ? 'not-allowed' : 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                gap: '10px',
-                                minWidth: '220px'
-                            }}
-                        >
-                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                {selectedAccountId 
-                                    ? userAccounts.find(a => a.account_id === selectedAccountId)?.institution_name + " \u2022\u2022\u2022\u2022" + (userAccounts.find(a => a.account_id === selectedAccountId)?.account_number_last4 || userAccounts.find(a => a.account_id === selectedAccountId)?.card_last4)
-                                    : "\u2014 Select destination account \u2014"}
-                            </span>
-                            <ChevronDown size={16} />
-                        </div>
-
-                        {isAccountDropdownOpen && (
-                            <div style={{
-                                position: 'absolute',
-                                top: '100%',
-                                left: 0,
-                                right: 0,
-                                transform: 'translateY(10px)',
-                                background: 'var(--bg-secondary)',
-                                border: '1px solid var(--glass-border)',
-                                borderRadius: '16px',
-                                boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
-                                zIndex: 1000,
-                                overflow: 'hidden',
-                                padding: '8px'
-                            }}>
-                                <div style={{ maxHeight: '250px', overflowY: 'auto', marginBottom: '8px' }}>
-                                    {userAccounts.length === 0 && (
-                                        <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
-                                            No accounts found.
-                                        </div>
-                                    )}
-                                    {userAccounts.map(acct => (
-                                        <div 
-                                            key={acct.account_id}
-                                            onClick={() => {
-                                                setSelectedAccountId(acct.account_id);
-                                                setAccountLinked(false);
-                                                setIsAccountDropdownOpen(false);
-                                            }}
-                                            style={{
-                                                padding: '10px 14px',
-                                                borderRadius: '10px',
-                                                cursor: 'pointer',
-                                                fontSize: '0.85rem',
-                                                fontWeight: 600,
-                                                background: selectedAccountId === acct.account_id ? 'rgba(72, 62, 168, 0.08)' : 'transparent',
-                                                color: selectedAccountId === acct.account_id ? 'var(--primary-action)' : 'var(--text-primary)',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '10px',
-                                                transition: 'all 0.15s'
-                                            }}
-                                            onMouseOver={e => e.currentTarget.style.background = 'rgba(72, 62, 168, 0.05)'}
-                                            onMouseOut={e => e.currentTarget.style.background = selectedAccountId === acct.account_id ? 'rgba(72, 62, 168, 0.08)' : 'transparent'}
-                                        >
-                                            {acct.card_last4 ? <CreditCard size={14} /> : <Building size={14} />}
-                                            <span>{acct.institution_name} <span style={{ opacity: 0.6, fontSize: '0.75rem', fontWeight: 500 }}>&bull;&bull;&bull;&bull;{acct.account_number_last4 || acct.card_last4}</span></span>
-                                        </div>
-                                    ))}
-                                </div>
-                                <div style={{ padding: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
+                    {/* Account Linker - Integrated */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', background: '#f1f5f9', padding: '0.5rem 0.75rem', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
+                        <div style={{ flex: 1, position: 'relative' }} ref={accountDropdownRef}>
+                            <div 
+                                onClick={() => !isApproved && setIsAccountDropdownOpen(!isAccountDropdownOpen)} 
+                                style={{ padding: '10px 14px', border: '1px solid #cbd5e1', borderRadius: '10px', background: 'white', cursor: isApproved ? 'not-allowed' : 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}
+                            >
+                                <span style={{ fontSize: '0.8rem', fontWeight: 400, color: selectedAccountId ? '#1e293b' : '#94a3b8' }}>
+                                    {selectedAccountId 
+                                        ? userAccounts.find(a => a.account_id === selectedAccountId)?.institution_name + " ••••" + (userAccounts.find(a => a.account_id === selectedAccountId)?.account_number_last4 || userAccounts.find(a => a.account_id === selectedAccountId)?.card_last4)
+                                        : "Select Bank Account..."}
+                                </span>
+                                <ChevronDown size={14} color="#64748b" />
+                            </div>
+                            
+                            {isAccountDropdownOpen && (
+                                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 10000, background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', boxShadow: '0 10px 30px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
+                                    <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '6px' }}>
+                                        {userAccounts.map(acc => (
+                                            <div 
+                                                key={acc.account_id}
+                                                onClick={() => { setSelectedAccountId(acc.account_id); setAccountLinked(false); setIsAccountDropdownOpen(false); }}
+                                                style={{ padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', transition: 'background 0.2s' }}
+                                                onMouseEnter={(e) => e.currentTarget.style.background = '#f1f5f9'}
+                                                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                                            >
+                                                <div style={{ fontWeight: 600, color: '#1e293b', fontSize: '0.8rem' }}>{acc.institution_name}</div>
+                                                <div style={{ fontSize: '0.7rem', color: '#64748b' }}>•••• {acc.account_number_last4 || acc.card_last4}</div>
+                                            </div>
+                                        ))}
+                                    </div>
                                     <button 
-                                        onClick={() => {
-                                            setIsAddAccountModalOpen(true);
-                                            setIsAccountDropdownOpen(false);
-                                        }}
-                                        style={{ 
-                                            display: 'flex', 
-                                            alignItems: 'center', 
-                                            gap: '8px', 
-                                            padding: '0.6rem', 
-                                            background: 'none', 
-                                            border: '1.5px dashed var(--primary-action)', 
-                                            borderRadius: '10px', 
-                                            color: 'var(--primary-action)', 
-                                            fontSize: '0.8rem', 
-                                            fontWeight: 700, 
-                                            cursor: 'pointer',
-                                            transition: 'all 0.2s',
-                                            width: '100%',
-                                            justifyContent: 'center'
-                                        }}
-                                        onMouseOver={e => e.currentTarget.style.background = 'rgba(72, 62, 168, 0.05)'}
-                                        onMouseOut={e => e.currentTarget.style.background = 'none'}
+                                        onClick={() => { setIsAddAccountModalOpen(true); setIsAccountDropdownOpen(false); }}
+                                        style={{ width: '100%', padding: '10px', border: 'none', borderTop: '1px solid #e2e8f0', background: '#f8fafc', color: 'var(--primary-action)', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}
                                     >
-                                        <Plus size={16} /> Add New Bank Account
+                                        + Add New Account
                                     </button>
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
+                        <button 
+                            disabled={!selectedAccountId || isApproved || isLinkingAccount} 
+                            onClick={handleLinkAccount}
+                            style={{ 
+                                padding: '10px 20px', 
+                                background: (selectedAccountId && !isApproved) ? 'var(--primary-action)' : 'white', 
+                                color: (selectedAccountId && !isApproved) ? 'white' : '#64748b', 
+                                border: '1px solid #cbd5e1', 
+                                borderRadius: '10px', 
+                                fontWeight: 700, 
+                                fontSize: '0.8rem',
+                                cursor: (selectedAccountId && !isApproved) ? 'pointer' : 'not-allowed',
+                                boxShadow: (selectedAccountId && !isApproved) ? '0 4px 12px rgba(72, 62, 168, 0.2)' : 'none',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                            }}
+                        >
+                            {isLinkingAccount ? (
+                                <><Loader2 size={14} className="spin-icon" /> Linking...</>
+                            ) : accountLinked ? (
+                                <><Check size={14} /> Linked</>
+                            ) : (
+                                "Link"
+                            )}
+                        </button>
+                    </div>
 
-                        {!accountLinked && (
-                            <button
-                                id="review-link-btn"
-                                onClick={handleLinkAccount}
-                                disabled={!selectedAccountId || isLinkingAccount || isApproved}
-                                style={{
-                                    padding: '0 1.5rem',
-                                    background: selectedAccountId ? 'var(--primary-action)' : '#e5e7eb',
-                                    color: 'white',
-                                    border: 'none',
-                                    borderRadius: '10px',
-                                    fontWeight: 700,
-                                    fontSize: '0.8rem',
-                                    cursor: selectedAccountId && !isApproved ? 'pointer' : 'not-allowed',
-                                }}
+                    {/* Parser Selection - Segmented Control style */}
+                    <div style={{ display: 'flex', gap: '4px', background: '#f1f5f9', padding: '3px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+                        <button 
+                            onClick={() => setActiveParser("CODE")} 
+                            style={{ flex: 1, padding: '6px', borderRadius: '6px', border: 'none', background: activeParser === "CODE" ? 'white' : 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontWeight: 700, fontSize: '0.75rem', color: activeParser === "CODE" ? 'var(--primary-action)' : '#64748b', boxShadow: activeParser === "CODE" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none' }}
+                        >
+                            Code-based
+                        </button>
+                        <button 
+                            onClick={() => setActiveParser("LLM")} 
+                            style={{ flex: 1, padding: '6px', borderRadius: '6px', border: 'none', background: activeParser === "LLM" ? 'white' : 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontWeight: 700, fontSize: '0.75rem', color: activeParser === "LLM" ? 'var(--primary-action)' : '#64748b', boxShadow: activeParser === "LLM" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none' }}
+                        >
+                            AI-powered
+                        </button>
+                    </div>
+
+                    {/* Transactions Section */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <div style={{ border: '1px solid #e2e8f0', borderRadius: '16px', overflow: 'hidden', background: '#f8fafc' }}>
+                            {renderTransactionTable(
+                                activeParser === "CODE" ? editableCodeTxns : editableLlmTxns,
+                                "Transactions",
+                                null,
+                                activeParser
+                            )}
+                        </div>
+
+                        {!isApproved && (currentPage >= Math.ceil((activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).length / rowsPerPage)) && (
+                            <button 
+                                onClick={() => handleAddTxn(activeParser)}
+                                style={{ padding: '12px', borderRadius: '12px', border: '2px dashed #cbd5e1', background: 'white', color: '#64748b', fontWeight: 700, fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', cursor: 'pointer', transition: 'all 0.2s' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--primary-action)'; e.currentTarget.style.color = 'var(--primary-action)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#cbd5e1'; e.currentTarget.style.color = '#64748b'; }}
                             >
-                                Link
+                                <Plus size={18} /> Add Missing Transactions
                             </button>
                         )}
-                        {accountLinked && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent-color)', fontWeight: 700, fontSize: '0.85rem', padding: '0 1rem' }}>
-                                <CheckCircle size={16} /> Linked
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'flex-start' }}>
-                <div id="review-tables" style={{ flex: 3, display: 'flex', flexDirection: 'column', gap: '1rem', minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem' }}>
-                        <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)' }}>Step 1: Choose extraction source & Edit if needed</div>
-                    </div>
-                    
-                    {renderTransactionTable(
-                        editableCodeTxns,
-                        "Code-Based Extraction",
-                        <Code size={20} style={{ color: 'var(--accent-color)' }} />,
-                        "CODE"
-                    )}
-                    
-                    {renderTransactionTable(
-                        editableLlmTxns,
-                        "AI-Powered Extraction",
-                        <Cpu size={20} style={{ color: 'var(--primary-action)' }} />,
-                        "LLM"
-                    )}
-                </div>
-
-                <div style={{ flex: 1, position: 'sticky', top: '2rem', minWidth: 0 }}>
-                    <div style={{
-                        background: 'var(--card-bg)',
-                        borderRadius: '20px',
-                        border: '1px solid var(--border-color)',
-                        padding: '1.5rem',
-                        boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)'
-                    }}>
-                        <h3 style={{ fontSize: '0.95rem', fontWeight: 800, marginBottom: '1rem', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <ScrollText size={18} style={{ color: 'var(--primary-action)' }} /> Analysis Meta
-                        </h3>
-                        
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                            <div style={{ background: 'var(--bg-secondary)', padding: '1rem', borderRadius: '12px' }}>
-                                <div style={{ fontSize: '0.65rem', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px' }}>Active Selection</div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    {activeParser === "CODE" ? <Code size={16} color="var(--accent-color)" /> : <Cpu size={16} color="var(--primary-action)" />}
-                                    <span style={{ fontWeight: 800, fontSize: '0.9rem' }}>{activeParser} Results</span>
-                                </div>
-                                <div style={{ fontSize: '0.75rem', marginTop: '4px', color: 'var(--text-secondary)' }}>
-                                    Selected {selectedIndices[activeParser].length} of {activeParser === "CODE" ? editableCodeTxns.length : editableLlmTxns.length} transactions.
-                                </div>
-                            </div>
-
-                            <div>
-                                <div style={{ fontSize: '0.65rem', fontWeight: 800, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px' }}>Format Identifiers</div>
-                                <pre style={{
-                                    background: 'var(--bg-secondary)',
-                                    padding: '1rem',
-                                    borderRadius: '12px',
-                                    fontSize: '0.7rem',
-                                    color: 'var(--text-primary)',
-                                    overflow: 'auto',
-                                    maxHeight: '300px',
-                                    border: '1px solid var(--border-color)',
-                                    margin: 0
-                                }}>
-                                    {JSON.stringify(data.identifier_json, null, 2)}
-                                </pre>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
 
             {/* Retry Extraction Modal */}
             {isRetryModalOpen && (
