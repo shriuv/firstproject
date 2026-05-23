@@ -6,6 +6,7 @@ import { Check, Code, FileSearch, Building2, Cpu, Loader2, ChevronLeft, ChevronR
 import API from "../api/api";
 import { useParsing } from "../context/ParsingContext";
 import PDFViewer from "../components/PDFViewer";
+import { Toast, useToast } from "../components/Toast";
 
 // Syntax highlighting helper for JSON
 const syntaxHighlight = (json) => {
@@ -140,6 +141,7 @@ const AmountEditor = ({ tx, onSave, onCancel }) => {
 };
 
 export default function ReviewPage() {
+    const { toasts, exiting, showToast, dismissToast } = useToast();
     const [searchParams] = useSearchParams();
     const documentId = searchParams.get("id");
     const navigate = useNavigate();
@@ -161,7 +163,6 @@ export default function ReviewPage() {
     const [selectedIndices, setSelectedIndices] = useState({ CODE: [], LLM: [] });
     const [activeParser, setActiveParser] = useState("CODE"); 
     const [currentPage, setCurrentPage] = useState(1);
-    const rowsPerPage = 15;
     const [editingCell, setEditingCell] = useState(null); // { parser, index, field }
     const [isRetryModalOpen, setIsRetryModalOpen] = useState(false);
     const [retryMethod, setRetryMethod] = useState("CODE"); // CODE, VISION, MANUAL
@@ -189,6 +190,7 @@ export default function ReviewPage() {
     const [pdfHighlightIndex, setPdfHighlightIndex] = useState(null);
     const [pdfHoverIndex, setPdfHoverIndex] = useState(null);
     const [tablePdfHighlight, setTablePdfHighlight] = useState(null);
+    const [lastInteraction, setLastInteraction] = useState(null); // 'PDF' or 'TABLE'
     const [activeView, setActiveView] = useState("extracted"); // "extracted" or "json"
     const [isFullscreen, setIsFullscreen] = useState(false); // fullscreen transactions view
 
@@ -251,11 +253,35 @@ export default function ReviewPage() {
             .finally(() => setPdfLoading(false));
     }, [documentId]);
 
-    // Find matching index in pdfMapData by date+amount
-    const findPdfMapIndex = (txn) => {
+    // Find matching index in pdfMapData by date+amount (occurrence-aware)
+    const findPdfMapIndex = (txn, tableIdx, parserType) => {
         if (!pdfMapData || !pdfMapData.length) return null;
         const date = String(txn.date || txn.txn_date || '');
         const amount = parseFloat(txn.debit || txn.credit || 0);
+
+        let occurrence = 0;
+        const txns = parserType === 'CODE' ? editableCodeTxns : editableLlmTxns;
+        for (let k = 0; k <= tableIdx; k++) {
+            const t = txns[k];
+            const tAmt = parseFloat(t.debit || t.credit || 0);
+            if (String(t.date || t.txn_date || '') === date && Math.abs(tAmt - amount) < 0.05) {
+                occurrence++;
+            }
+        }
+
+        let matchCount = 0;
+        for (let j = 0; j < pdfMapData.length; j++) {
+            const pt = pdfMapData[j];
+            if (!pt.bbox) continue;
+            const pdfDate = String(pt.date || pt.txn_date || '');
+            const pdfAmt  = parseFloat(pt.debit || pt.credit || 0);
+            if (pdfDate === date && Math.abs(pdfAmt - amount) < 0.05) {
+                matchCount++;
+                if (matchCount === occurrence) return j;
+            }
+        }
+        
+        // Fallback to first match
         for (let j = 0; j < pdfMapData.length; j++) {
             const pt = pdfMapData[j];
             if (!pt.bbox) continue;
@@ -263,36 +289,62 @@ export default function ReviewPage() {
             const pdfAmt  = parseFloat(pt.debit || pt.credit || 0);
             if (pdfDate === date && Math.abs(pdfAmt - amount) < 0.05) return j;
         }
+
         return null;
     };
 
-    // Find matching table-row index by date+amount
-    const findTableIndex = (pdfTxn, parserType) => {
-        const txns = parserType === 'CODE' ? editableCodeTxns : editableLlmTxns;
+    // Find matching table-row index by date+amount (occurrence-aware)
+    const findTableIndex = (pdfTxn, pdfIdx, parserType) => {
         const date  = String(pdfTxn.date || pdfTxn.txn_date || '');
         const amount = parseFloat(pdfTxn.debit || pdfTxn.credit || 0);
+
+        let occurrence = 0;
+        for (let j = 0; j <= pdfIdx; j++) {
+            const pt = pdfMapData[j];
+            if (!pt.bbox) continue; 
+            const ptDate = String(pt.date || pt.txn_date || '');
+            const ptAmt = parseFloat(pt.debit || pt.credit || 0);
+            if (ptDate === date && Math.abs(ptAmt - amount) < 0.05) {
+                occurrence++;
+            }
+        }
+
+        const txns = parserType === 'CODE' ? editableCodeTxns : editableLlmTxns;
+        let matchCount = 0;
+        for (let k = 0; k < txns.length; k++) {
+            const t = txns[k];
+            const tAmt = parseFloat(t.debit || t.credit || 0);
+            if (String(t.date || t.txn_date || '') === date && Math.abs(tAmt - amount) < 0.05) {
+                matchCount++;
+                if (matchCount === occurrence) return k;
+            }
+        }
+
+        // Fallback to first match
         for (let k = 0; k < txns.length; k++) {
             const t = txns[k];
             const tAmt = parseFloat(t.debit || t.credit || 0);
             if (String(t.date || t.txn_date || '') === date && Math.abs(tAmt - amount) < 0.05) return k;
         }
+        
         return null;
     };
 
     const handleApprove = async () => {
-        if (!accountLinked) { alert("Please link an account before approving."); return; }
+        if (!accountLinked) { showToast("Please link an account before approving.", "error"); return; }
         const txnsToUse = activeParser === "CODE" ? editableCodeTxns : editableLlmTxns;
         const currentIndices = selectedIndices[activeParser];
-        if (currentIndices.length === 0) { alert("Please select at least one transaction to approve."); return; }
+        if (currentIndices.length === 0) { showToast("Please select at least one transaction to approve.", "error"); return; }
         const selectedTxns = currentIndices.map(i => txnsToUse[i]);
         setIsApproving(true);
         try {
             await API.post(`/documents/${documentId}/approve`, { transactions: selectedTxns, parser_type: activeParser });
             setIsApproved(true);
             setData(prev => prev ? { ...prev, status: "APPROVE" } : prev);
+            showToast(`${selectedTxns.length} transactions approved successfully!`, "success");
         } catch (err) {
             console.error(err);
-            alert("Approval failed: " + (err.response?.data?.detail || err.message));
+            showToast("Approval failed: " + (err.response?.data?.detail || err.message), "error");
         } finally {
             setIsApproving(false);
         }
@@ -320,9 +372,10 @@ export default function ReviewPage() {
             setAccountLinked(true);
             // Re-fetch data to trigger backend deduplication now that account is linked
             await fetchReviewData();
+            showToast("Account linked successfully!", "success");
         } catch (err) {
             console.error(err);
-            alert("Failed to link account: " + (err.response?.data?.detail || err.message));
+            showToast("Failed to link account: " + (err.response?.data?.detail || err.message), "error");
         } finally {
             setIsLinkingAccount(false);
         }
@@ -330,11 +383,11 @@ export default function ReviewPage() {
 
     const handleCreateAccount = async () => {
         if (!newAccountForm.institution_name || !newAccountForm.last4) {
-            alert("Please fill in Institution Name and Last 4 digits.");
+            showToast("Please fill in Institution Name and Last 4 digits.", "error");
             return;
         }
         if (newAccountForm.last4.length !== 4) {
-            alert("Last 4 digits must be exactly 4 numbers.");
+            showToast("Last 4 digits must be exactly 4 numbers.", "error");
             return;
         }
 
@@ -355,10 +408,11 @@ export default function ReviewPage() {
             // Auto-link newly created account
             await API.post(`/documents/${documentId}/select-account`, { account_id: createdAcc.account_id });
             setAccountLinked(true);
+            showToast("Account created and linked successfully!", "success");
             
         } catch (err) {
             console.error(err);
-            alert("Failed to create account: " + (err.response?.data?.detail || err.message));
+            showToast("Failed to create account: " + (err.response?.data?.detail || err.message), "error");
         } finally {
             setIsAddingAccount(false);
         }
@@ -379,7 +433,7 @@ export default function ReviewPage() {
             navigate("/parsing");
         } catch (err) {
             console.error(err);
-            alert("Retry failed: " + (err.response?.data?.detail || err.message));
+            showToast("Retry failed: " + (err.response?.data?.detail || err.message), "error");
         } finally {
             setIsRetrying(false);
             setIsRetryModalOpen(false);
@@ -476,9 +530,10 @@ export default function ReviewPage() {
             a.download = `${(data?.bank_name || "transactions").replace(/\s+/g, "_")}_transactions.json`;
             a.click();
             URL.revokeObjectURL(url);
+            showToast("JSON downloaded successfully!", "success");
         } catch (err) {
             console.error(err);
-            alert("Download failed.");
+            showToast("Download failed.", "error");
         }
     };
 
@@ -502,13 +557,64 @@ export default function ReviewPage() {
     const renderTransactionTable = (transactions, title, icon, parserType) => {
         const isActive = activeParser === parserType;
         const currentSelected = selectedIndices[parserType] || [];
+        
+        // Map transactions to their PDF pages
+        let txnPages = new Array(transactions.length).fill(1);
+        if (transactions.length > 0) {
+            let lastPage = null;
+            let pdfSearchStart = 0;
+            
+            for (let i = 0; i < transactions.length; i++) {
+                const txn = transactions[i];
+                const date = String(txn.date || txn.txn_date || '');
+                const amount = parseFloat(txn.debit || txn.credit || 0);
+                let matchedPage = null;
+                
+                if (pdfMapData && pdfMapData.length > 0) {
+                    for (let j = pdfSearchStart; j < pdfMapData.length; j++) {
+                        const pt = pdfMapData[j];
+                        const pdfDate = String(pt.date || pt.txn_date || '');
+                        const pdfAmt  = parseFloat(pt.debit || pt.credit || 0);
+                        if (pdfDate === date && Math.abs(pdfAmt - amount) < 0.05) {
+                            matchedPage = pt.page;
+                            pdfSearchStart = j + 1;
+                            break;
+                        }
+                    }
+                }
+                
+                if (matchedPage !== null) {
+                    lastPage = matchedPage;
+                    txnPages[i] = matchedPage;
+                } else {
+                    txnPages[i] = lastPage;
+                }
+            }
+            
+            let firstKnownPage = txnPages.find(p => p !== null) || 1;
+            for (let i = txnPages.length - 1; i >= 0; i--) {
+                if (txnPages[i] === null) {
+                    txnPages[i] = firstKnownPage;
+                } else {
+                    firstKnownPage = txnPages[i];
+                }
+            }
+        }
+
         // Pagination Logic
-        const totalPages = Math.ceil(transactions.length / rowsPerPage);
-        const startIndex = (currentPage - 1) * rowsPerPage;
-        const pagedTransactions = transactions.slice(startIndex, startIndex + rowsPerPage);
+        const totalPages = Math.max(pdfPageCount || 1, Math.max(...txnPages, 1));
+        
+        const pagedTransactions = [];
+        const pagedIndices = [];
+        
+        for (let i = 0; i < transactions.length; i++) {
+            if (txnPages[i] === currentPage) {
+                pagedTransactions.push(transactions[i]);
+                pagedIndices.push(i);
+            }
+        }
         
         // Check if all rows on CURRENT page are selected
-        const pagedIndices = pagedTransactions.map((_, i) => startIndex + i);
         const isAllSelected = pagedIndices.length > 0 && pagedIndices.every(idx => currentSelected.includes(idx));
 
         return (
@@ -604,29 +710,6 @@ export default function ReviewPage() {
                         </span>
                     </div>
 
-                    {totalPages > 1 && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                                Page <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>{currentPage}</span> of {totalPages}
-                            </div>
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                <button 
-                                    disabled={currentPage === 1}
-                                    onClick={(e) => { e.stopPropagation(); setCurrentPage(p => Math.max(1, p - 1)); }}
-                                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: currentPage === 1 ? 'not-allowed' : 'pointer', opacity: currentPage === 1 ? 0.5 : 1 }}
-                                >
-                                    <ChevronLeft size={14} />
-                                </button>
-                                <button 
-                                    disabled={currentPage === totalPages}
-                                    onClick={(e) => { e.stopPropagation(); setCurrentPage(p => Math.min(totalPages, p + 1)); }}
-                                    style={{ padding: '4px 8px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'white', cursor: currentPage === totalPages ? 'not-allowed' : 'pointer', opacity: currentPage === totalPages ? 0.5 : 1 }}
-                                >
-                                    <ChevronRight size={14} />
-                                </button>
-                            </div>
-                        </div>
-                    )}
                     </div>
 
                 <div id="review-table" style={{ overflowX: 'auto' }}>
@@ -652,7 +735,7 @@ export default function ReviewPage() {
                         </thead>
                         <tbody>
                             {pagedTransactions && pagedTransactions.length > 0 ? pagedTransactions.map((tx, i) => {
-                                const realIndex = startIndex + i;
+                                const realIndex = pagedIndices[i];
                                 const isSelected = currentSelected.includes(realIndex);
                                 const isDebit = (tx.debit || 0) > 0;
                                 const amount = isDebit ? tx.debit : tx.credit;
@@ -664,7 +747,8 @@ export default function ReviewPage() {
                                         id={`txn-row-${parserType}-${realIndex}`}
                                         onClick={() => {
                                             if (isActive && !tx.is_duplicate) {
-                                                const pdfIdx = findPdfMapIndex(tx);
+                                                setLastInteraction('TABLE');
+                                                const pdfIdx = findPdfMapIndex(tx, realIndex, parserType);
                                                 setPdfHighlightIndex(pdfIdx !== null ? pdfIdx : realIndex);
                                                 setTablePdfHighlight(realIndex);
                                             }
@@ -1029,201 +1113,183 @@ export default function ReviewPage() {
             {/* Main 50-50 Split Layout */}
             <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
                 {/* Left Column: PDF Viewer (Strict 50%) */}
-                <div style={{ width: 'calc(50% - 0.5rem)', position: 'sticky', top: '6rem', height: 'calc(100vh - 120px)' }}>
+                <div style={{ width: 'calc(50% - 0.5rem)', position: 'sticky', top: '5.5rem', height: 'calc(100vh - 6.5rem)' }}>
                     <PDFViewer
                         documentId={documentId ? parseInt(documentId) : null}
                         transactions={pdfMapData}
                         pageCount={pdfPageCount}
                         selectedTxnIndex={pdfHighlightIndex}
                         onSelectTxn={(pdfIdx) => {
+                            setLastInteraction('PDF');
                             setPdfHighlightIndex(pdfIdx);
                             const pdfTxn = pdfMapData[pdfIdx];
                             if (!pdfTxn) return;
-                            const tableIdx = findTableIndex(pdfTxn, activeParser);
+                            const tableIdx = findTableIndex(pdfTxn, pdfIdx, activeParser);
                             const finalIdx = tableIdx !== null ? tableIdx : pdfIdx;
                             setTablePdfHighlight(finalIdx);
                             
                             // Change table pagination page if necessary
-                            const requiredPage = Math.floor(finalIdx / rowsPerPage) + 1;
+                            const requiredPage = pdfTxn.page || 1;
                             setCurrentPage(requiredPage);
 
                             setTimeout(() => {
                                 const el = document.getElementById(`txn-row-${activeParser}-${finalIdx}`);
                                 if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            }, 50);
+                            }, 150);
                         }}
                         hoveredTxnIndex={pdfHoverIndex}
                         onHoverTxn={setPdfHoverIndex}
                         hidePageCount={true}
+                        currentPage={currentPage}
+                        onPageChange={setCurrentPage}
+                        disableAutoScroll={lastInteraction === 'PDF'}
                     />
                 </div>
 
                 {/* Right Column: Control Panel (Strict 50%) */}
-                <div style={{ width: 'calc(50% - 0.5rem)', display: 'flex', flexDirection: 'column', gap: '0.75rem', background: 'white', padding: '1rem', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
+                <div style={{ width: 'calc(50% - 0.5rem)', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
                     
-                    {/* Header: Clean & Unobtrusive */}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h2 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            Extraction Results
-                        </h2>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            <button 
-                                onClick={handleDownloadJson}
-                                title="Export extracted data as a JSON file"
-                                style={{ padding: '8px 12px', borderRadius: '8px', background: 'white', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s' }}
-                                onMouseEnter={(e) => { e.currentTarget.style.background = '#f8fafc'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
-                                onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; e.currentTarget.style.transform = 'translateY(0)'; }}
-                            >
-                                <Download size={14} /> Export JSON
-                            </button>
-                            <button 
-                                onClick={handleApprove}
-                                disabled={isApproving || isApproved}
-                                style={{ 
-                                    padding: '8px 20px', 
-                                    borderRadius: '8px', 
-                                    background: isApproved ? '#ecfdf5' : 'var(--primary-action)', 
-                                    color: isApproved ? '#059669' : 'white', 
-                                    border: 'none', 
-                                    fontSize: '0.8rem', 
-                                    fontWeight: 700, 
-                                    cursor: (isApproving || isApproved) ? 'not-allowed' : 'pointer', 
-                                    display: 'flex', 
-                                    alignItems: 'center', 
-                                    gap: '8px', 
-                                    transition: 'all 0.2s',
-                                    boxShadow: isApproved ? 'none' : '0 4px 12px rgba(72, 62, 168, 0.25)'
-                                }}
-                                onMouseEnter={(e) => { if(!isApproved && !isApproving) { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 16px rgba(72, 62, 168, 0.35)'; } }}
-                                onMouseLeave={(e) => { if(!isApproved && !isApproving) { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 4px 12px rgba(72, 62, 168, 0.25)'; } }}
-                            >
-                                {isApproving ? <Loader2 size={14} className="spin-icon" /> : <Check size={14} />}
-                                {isApproved ? 'Approved' : `Approve All`}
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Document Info - Subtle Contrast */}
-                    <div style={{ background: '#f8fafc', padding: '0.5rem 0.75rem', borderRadius: '16px', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                            <div>
-                                <div style={{ fontSize: '0.65rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.025em' }}>Bank Name</div>
-                                <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#1e293b' }}>{data?.bank_name || 'N/A'}</div>
-                            </div>
-                            <div style={{ textAlign: 'right' }}>
-                                <div style={{ fontSize: '0.65rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px', letterSpacing: '0.025em' }}>Statement Type</div>
-                                <span style={{ background: 'white', border: '1px solid #e2e8f0', color: 'var(--primary-action)', padding: '3px 10px', borderRadius: '6px', fontSize: '0.7rem', fontWeight: 700, boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-                                    {data?.identifier_json?.document_family || 'N/A'}
+                    {/* Step 1: Link Bank Account */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', opacity: isApproved ? 0.8 : 1, transition: 'all 0.3s ease' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', padding: '0 0.5rem' }}>
+                            <h2 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ background: accountLinked ? 'var(--accent-color)' : 'var(--primary-action)', color: 'white', width: '20px', height: '20px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem' }}>
+                                    {accountLinked ? <Check size={12} strokeWidth={3} /> : "1"}
                                 </span>
-                            </div>
+                                Link Bank Account
+                            </h2>
                         </div>
-                    </div>
 
-                    {/* Account Linker - Integrated */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', background: '#f1f5f9', padding: '0.5rem 0.75rem', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-                        <div style={{ flex: 1, position: 'relative' }} ref={accountDropdownRef}>
-                            <div 
-                                onClick={() => !isApproved && setIsAccountDropdownOpen(!isAccountDropdownOpen)} 
-                                style={{ padding: '10px 14px', border: '1px solid #cbd5e1', borderRadius: '10px', background: 'white', cursor: isApproved ? 'not-allowed' : 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}
-                            >
-                                <span style={{ fontSize: '0.8rem', fontWeight: 400, color: selectedAccountId ? '#1e293b' : '#94a3b8' }}>
-                                    {selectedAccountId 
-                                        ? userAccounts.find(a => a.account_id === selectedAccountId)?.institution_name + " ••••" + (userAccounts.find(a => a.account_id === selectedAccountId)?.account_number_last4 || userAccounts.find(a => a.account_id === selectedAccountId)?.card_last4)
-                                        : "Select Bank Account..."}
-                                </span>
-                                <ChevronDown size={14} color="#64748b" />
-                            </div>
-                            
-                            {isAccountDropdownOpen && (
-                                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 10000, background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', boxShadow: '0 10px 30px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
-                                    <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '6px' }}>
-                                        {userAccounts.map(acc => (
-                                            <div 
-                                                key={acc.account_id}
-                                                onClick={() => { setSelectedAccountId(acc.account_id); setAccountLinked(false); setIsAccountDropdownOpen(false); }}
-                                                style={{ padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', transition: 'background 0.2s' }}
-                                                onMouseEnter={(e) => e.currentTarget.style.background = '#f1f5f9'}
-                                                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-                                            >
-                                                <div style={{ fontWeight: 600, color: '#1e293b', fontSize: '0.8rem' }}>{acc.institution_name}</div>
-                                                <div style={{ fontSize: '0.7rem', color: '#64748b' }}>•••• {acc.account_number_last4 || acc.card_last4}</div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <button 
-                                        onClick={() => { setIsAddAccountModalOpen(true); setIsAccountDropdownOpen(false); }}
-                                        style={{ width: '100%', padding: '10px', border: 'none', borderTop: '1px solid #e2e8f0', background: '#f8fafc', color: 'var(--primary-action)', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}
-                                    >
-                                        + Add New Account
-                                    </button>
+                        {/* Account Linker - Integrated */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0 0.5rem' }}>
+                            <div style={{ flex: 1, position: 'relative' }} ref={accountDropdownRef}>
+                                <div 
+                                    onClick={() => !isApproved && setIsAccountDropdownOpen(!isAccountDropdownOpen)} 
+                                    style={{ padding: '10px 14px', border: '1px solid #cbd5e1', borderRadius: '10px', background: 'white', cursor: isApproved ? 'not-allowed' : 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}
+                                >
+                                    <span style={{ fontSize: '0.85rem', fontWeight: 500, color: selectedAccountId ? '#1e293b' : '#94a3b8' }}>
+                                        {selectedAccountId 
+                                            ? userAccounts.find(a => a.account_id === selectedAccountId)?.institution_name + " ••••" + (userAccounts.find(a => a.account_id === selectedAccountId)?.account_number_last4 || userAccounts.find(a => a.account_id === selectedAccountId)?.card_last4)
+                                            : "Select Bank Account..."}
+                                    </span>
+                                    <ChevronDown size={14} color="#64748b" />
                                 </div>
-                            )}
-                        </div>
-                        <button 
-                            disabled={!selectedAccountId || isApproved || isLinkingAccount} 
-                            onClick={handleLinkAccount}
-                            style={{ 
-                                padding: '10px 20px', 
-                                background: (selectedAccountId && !isApproved) ? 'var(--primary-action)' : 'white', 
-                                color: (selectedAccountId && !isApproved) ? 'white' : '#64748b', 
-                                border: '1px solid #cbd5e1', 
-                                borderRadius: '10px', 
-                                fontWeight: 700, 
-                                fontSize: '0.8rem',
-                                cursor: (selectedAccountId && !isApproved) ? 'pointer' : 'not-allowed',
-                                boxShadow: (selectedAccountId && !isApproved) ? '0 4px 12px rgba(72, 62, 168, 0.2)' : 'none',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px'
-                            }}
-                        >
-                            {isLinkingAccount ? (
-                                <><Loader2 size={14} className="spin-icon" /> Linking...</>
-                            ) : accountLinked ? (
-                                <><Check size={14} /> Linked</>
-                            ) : (
-                                "Link"
-                            )}
-                        </button>
-                    </div>
-
-                    {/* Parser Selection - Segmented Control style */}
-                    <div style={{ display: 'flex', gap: '4px', background: '#f1f5f9', padding: '3px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
-                        <button 
-                            onClick={() => setActiveParser("CODE")} 
-                            style={{ flex: 1, padding: '6px', borderRadius: '6px', border: 'none', background: activeParser === "CODE" ? 'white' : 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontWeight: 700, fontSize: '0.75rem', color: activeParser === "CODE" ? 'var(--primary-action)' : '#64748b', boxShadow: activeParser === "CODE" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none' }}
-                        >
-                            Code-based
-                        </button>
-                        <button 
-                            onClick={() => setActiveParser("LLM")} 
-                            style={{ flex: 1, padding: '6px', borderRadius: '6px', border: 'none', background: activeParser === "LLM" ? 'white' : 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontWeight: 700, fontSize: '0.75rem', color: activeParser === "LLM" ? 'var(--primary-action)' : '#64748b', boxShadow: activeParser === "LLM" ? '0 2px 4px rgba(0,0,0,0.05)' : 'none' }}
-                        >
-                            AI-powered
-                        </button>
-                    </div>
-
-                    {/* Transactions Section */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                        <div style={{ border: '1px solid #e2e8f0', borderRadius: '16px', overflow: 'hidden', background: '#f8fafc' }}>
-                            {renderTransactionTable(
-                                activeParser === "CODE" ? editableCodeTxns : editableLlmTxns,
-                                "Transactions",
-                                null,
-                                activeParser
-                            )}
-                        </div>
-
-                        {!isApproved && (currentPage >= Math.ceil((activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).length / rowsPerPage)) && (
+                                
+                                {isAccountDropdownOpen && (
+                                    <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 10000, background: 'white', border: '1px solid #e2e8f0', borderRadius: '12px', boxShadow: '0 10px 30px rgba(0,0,0,0.15)', overflow: 'hidden' }}>
+                                        <div style={{ maxHeight: '200px', overflowY: 'auto', padding: '6px' }}>
+                                            {userAccounts.map(acc => (
+                                                <div 
+                                                    key={acc.account_id}
+                                                    onClick={() => { setSelectedAccountId(acc.account_id); setAccountLinked(false); setIsAccountDropdownOpen(false); }}
+                                                    style={{ padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.8rem', transition: 'background 0.2s' }}
+                                                    onMouseEnter={(e) => e.currentTarget.style.background = '#f1f5f9'}
+                                                    onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+                                                >
+                                                    <div style={{ fontWeight: 600, color: '#1e293b', fontSize: '0.85rem' }}>{acc.institution_name}</div>
+                                                    <div style={{ fontSize: '0.75rem', color: '#64748b' }}>•••• {acc.account_number_last4 || acc.card_last4}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button 
+                                            onClick={() => { setIsAddAccountModalOpen(true); setIsAccountDropdownOpen(false); }}
+                                            style={{ width: '100%', padding: '10px', border: 'none', borderTop: '1px solid #e2e8f0', background: '#f8fafc', color: 'var(--primary-action)', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer' }}
+                                        >
+                                            + Add New Account
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
                             <button 
-                                onClick={() => handleAddTxn(activeParser)}
-                                style={{ padding: '12px', borderRadius: '12px', border: '2px dashed #cbd5e1', background: 'white', color: '#64748b', fontWeight: 700, fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', cursor: 'pointer', transition: 'all 0.2s' }}
-                                onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--primary-action)'; e.currentTarget.style.color = 'var(--primary-action)'; }}
-                                onMouseLeave={(e) => { e.currentTarget.style.borderColor = '#cbd5e1'; e.currentTarget.style.color = '#64748b'; }}
+                                disabled={!selectedAccountId || isApproved || isLinkingAccount || accountLinked} 
+                                onClick={handleLinkAccount}
+                                style={{ 
+                                    padding: '10px 20px', 
+                                    background: (accountLinked || isApproved) ? 'transparent' : (selectedAccountId ? 'var(--primary-action)' : 'white'), 
+                                    color: (accountLinked || isApproved) ? 'var(--accent-color)' : (selectedAccountId ? 'white' : 'var(--primary-action)'), 
+                                    border: (accountLinked || isApproved) ? '1px solid var(--accent-color)' : (selectedAccountId ? '1px solid var(--primary-action)' : '1px solid #cbd5e1'), 
+                                    borderRadius: '10px', 
+                                    fontWeight: 600, 
+                                    fontSize: '0.85rem',
+                                    cursor: (!selectedAccountId || isApproved || accountLinked) ? 'default' : 'pointer',
+                                    boxShadow: (selectedAccountId && !accountLinked && !isApproved) ? '0 4px 12px rgba(72, 62, 168, 0.2)' : 'none',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    transition: 'all 0.3s ease'
+                                }}
                             >
-                                <Plus size={18} /> Add Missing Transactions
+                                {isLinkingAccount ? (
+                                    <><Loader2 size={14} className="spin-icon" /> Linking...</>
+                                ) : accountLinked ? (
+                                    <><Check size={14} /> Linked</>
+                                ) : (
+                                    "Link Account"
+                                )}
                             </button>
-                        )}
+                        </div>
+                    </div>
+
+                    {/* Step 2: Extracted Transactions */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', transition: 'all 0.3s ease' }}>
+                        {/* Header: Clean & Unobtrusive */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', padding: '0 0.5rem' }}>
+                            <h2 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-primary)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{ background: isApproved ? 'var(--accent-color)' : (accountLinked ? 'var(--primary-action)' : '#cbd5e1'), color: 'white', width: '20px', height: '20px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', transition: 'all 0.3s ease' }}>
+                                    {isApproved ? <Check size={12} strokeWidth={3} /> : "2"}
+                                </span>
+                                Review & Approve
+                            </h2>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <button 
+                                    onClick={handleApprove}
+                                    disabled={!accountLinked || isApproving || isApproved}
+                                    style={{ 
+                                        padding: '8px 20px', 
+                                        borderRadius: '8px', 
+                                        background: isApproved ? 'transparent' : (accountLinked ? 'var(--primary-action)' : 'white'), 
+                                        color: isApproved ? 'var(--accent-color)' : (accountLinked ? 'white' : 'var(--primary-action)'), 
+                                        border: isApproved ? '1px solid var(--accent-color)' : (accountLinked ? '1px solid var(--primary-action)' : '1px solid #cbd5e1'), 
+                                        fontSize: '0.85rem', 
+                                        fontWeight: 600, 
+                                        cursor: (!accountLinked || isApproving || isApproved) ? 'not-allowed' : 'pointer', 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        gap: '6px', 
+                                        transition: 'all 0.3s ease',
+                                        boxShadow: (!accountLinked || isApproved) ? 'none' : '0 4px 12px rgba(72, 62, 168, 0.25)'
+                                    }}
+                                >
+                                    {isApproving ? <Loader2 size={14} className="spin-icon" /> : <Check size={14} />}
+                                    {isApproved ? 'Approved' : `Approve Data`}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Transactions Section Container */}
+                        <div style={{ display: 'flex', flexDirection: 'column', background: 'white', borderRadius: '20px', border: '1px solid var(--border-color)', boxShadow: '0 4px 20px rgba(0,0,0,0.02)', overflow: 'hidden' }}>
+                            {/* The Table Itself */}
+                            <div>
+                                {renderTransactionTable(
+                                    activeParser === "CODE" ? editableCodeTxns : editableLlmTxns,
+                                    "Transactions",
+                                    null,
+                                    activeParser
+                                )}
+                            </div>
+
+                            {/* Bottom Action Bar */}
+                            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '0.75rem 1.25rem', background: '#f8fafc', borderTop: '1px solid #e2e8f0' }}>
+                                {!isApproved && (currentPage >= (pdfPageCount || 1)) ? (
+                                    <button 
+                                        onClick={() => handleAddTxn(activeParser)}
+                                        style={{ padding: '8px 16px', borderRadius: '8px', border: 'none', background: 'transparent', color: 'var(--primary-action)', fontWeight: 700, fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                                    >
+                                        <Plus size={16} /> Add Missing Row
+                                    </button>
+                                ) : <div />}
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1448,6 +1514,7 @@ export default function ReviewPage() {
                     </motion.div>
                 </div>
             )}
+            <Toast toasts={toasts} exiting={exiting} onDismiss={dismissToast} />
         </motion.div>
     );
 }

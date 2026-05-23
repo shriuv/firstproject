@@ -26,8 +26,21 @@ export default function PDFViewer({
     hoveredTxnIndex = null,
     onHoverTxn,
     hidePageCount = false,
+    currentPage: externalPage,
+    onPageChange,
+    disableAutoScroll = false,
 }) {
-    const [currentPage, setCurrentPage] = useState(1);
+    const [internalPage, setInternalPage] = useState(1);
+    const currentPage = externalPage !== undefined ? externalPage : internalPage;
+    
+    const setCurrentPage = (pageOrFn) => {
+        const newPage = typeof pageOrFn === 'function' ? pageOrFn(currentPage) : pageOrFn;
+        if (onPageChange) {
+            onPageChange(newPage);
+        } else {
+            setInternalPage(newPage);
+        }
+    };
     const [pageCache, setPageCache] = useState({}); // { pageNum: { image_b64, width, height } }
     const [loadingPage, setLoadingPage] = useState(false);
     const [pageError, setPageError] = useState(null);
@@ -46,12 +59,12 @@ export default function PDFViewer({
 
     // Scroll selected transaction into view
     useEffect(() => {
-        if (selectedBboxRef.current && containerRef.current) {
+        if (!disableAutoScroll && selectedBboxRef.current && containerRef.current) {
             setTimeout(() => {
                 selectedBboxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
             }, 100);
         }
-    }, [selectedTxnIndex, currentPage, pageCache]);
+    }, [selectedTxnIndex, currentPage, pageCache, disableAutoScroll]);
 
     // Load page image
     useEffect(() => {
@@ -293,9 +306,6 @@ export default function PDFViewer({
             <div style={styles.footer}>
                 <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
                     {currentPageTxns.length} transaction{currentPageTxns.length !== 1 ? "s" : ""} on this page
-                </span>
-                <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
-                    {transactions.filter(t => t.bbox).length}/{transactions.length} matched
                 </span>
             </div>
         </div>
