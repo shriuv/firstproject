@@ -281,20 +281,20 @@ export default function ParsingPage() {
 
     return (
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} style={{ padding: '16px 32px' }}>
-            <div className="overview-header" style={{ marginBottom: '16px' }}>
+            <div className="overview-header" style={{ marginBottom: '24px' }}>
                 <h1 style={{ fontSize: '24px', margin: 0 }}>Parsing</h1>
             </div>
 
-            <div className="upload-page-card" style={{
-                background: 'var(--bg-secondary)',
-                padding: '2.5rem 2rem',
-                borderRadius: '16px',
-                marginBottom: '2.5rem',
-                border: '1px solid var(--border-color)',
-                maxWidth: '860px',
-                margin: '0 auto 2.5rem',
-                position: 'relative'
-            }}>
+            <div style={{ display: 'flex', gap: '2rem', alignItems: 'stretch', marginBottom: '3rem' }}>
+                <div className="upload-page-card" style={{
+                    flex: '1.5',
+                    background: 'var(--bg-secondary)',
+                    padding: '2.5rem 2rem',
+                    borderRadius: '16px',
+                    border: '1px solid var(--border-color)',
+                    position: 'relative',
+                    minWidth: 0
+                }}>
                 {activeDoc && (
                     <div style={{ marginBottom: '1.5rem' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '1.5rem' }}>
@@ -439,7 +439,7 @@ export default function ParsingPage() {
                 )}
             </div>
 
-            <div id="parsing-summary" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1.5rem', marginBottom: '3rem' }}>
+            <div id="parsing-summary" style={{ flex: '1', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1.5rem', alignContent: 'start' }}>
                 <div style={{ background: 'var(--card-bg)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
                     <div style={{ padding: '0.75rem', background: 'rgba(72, 62, 168, 0.08)', borderRadius: '14px', color: 'var(--primary-action)' }}>
                         <ScrollText size={24} />
@@ -479,6 +479,7 @@ export default function ParsingPage() {
                         <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-primary)' }}>{stats.pending_review || 0}</div>
                     </div>
                 </div>
+            </div>
             </div>
 
             {/* Sort and Search Only */}
