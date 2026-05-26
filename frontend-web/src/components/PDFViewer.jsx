@@ -68,7 +68,7 @@ export default function PDFViewer({
 
     // Load page image
     useEffect(() => {
-        if (!documentId || pageCount === 0) return;
+        if (!documentId) return;
         if (pageCache[currentPage]) return; // already cached
 
         setLoadingPage(true);
@@ -80,16 +80,21 @@ export default function PDFViewer({
             })
             .catch(err => {
                 console.error("PDF page load error:", err);
-                setPageError("Failed to load page.");
+                if (err.response?.status === 403) {
+                    setPageError("Incorrect document password.");
+                } else {
+                    setPageError("Failed to load page.");
+                }
             })
             .finally(() => setLoadingPage(false));
-    }, [documentId, currentPage, pageCount]);
+    }, [documentId, currentPage]);
 
     // Pre-fetch next page
     useEffect(() => {
-        if (!documentId || pageCount === 0) return;
+        if (!documentId) return;
         const next = currentPage + 1;
-        if (next <= pageCount && !pageCache[next]) {
+        // Pre-fetch if we know pageCount and it's within bounds, or if pageCount is not yet known.
+        if ((pageCount === 0 || next <= pageCount) && !pageCache[next]) {
             API.get(`/documents/${documentId}/pdf-page/${next}`)
                 .then(res => setPageCache(prev => ({ ...prev, [next]: res.data })))
                 .catch(() => {});
@@ -119,7 +124,7 @@ export default function PDFViewer({
     };
 
     const canGoPrev = currentPage > 1;
-    const canGoNext = currentPage < pageCount;
+    const canGoNext = pageCount > 0 ? currentPage < pageCount : false;
 
     if (!documentId) {
         return (
@@ -132,17 +137,6 @@ export default function PDFViewer({
         );
     }
 
-    if (pageCount === 0 && !loadingPage) {
-        return (
-            <div style={styles.placeholder}>
-                <Loader2 size={32} className="spin-icon" color="var(--primary-action)" />
-                <p style={{ color: "var(--text-secondary)", marginTop: "1rem", fontSize: "0.875rem" }}>
-                    Loading PDF map…
-                </p>
-            </div>
-        );
-    }
-
     return (
         <div style={styles.wrapper}>
             {/* ── Toolbar ───────────────────────────────────────────── */}
@@ -150,7 +144,7 @@ export default function PDFViewer({
                 <div style={styles.toolbarLeft}>
                     <Eye size={15} color="var(--primary-action)" />
                     <span style={styles.toolbarTitle}>PDF Viewer</span>
-                    {!hidePageCount && <span style={styles.badge}>{pageCount} pages</span>}
+                    {!hidePageCount && <span style={styles.badge}>{pageCount > 0 ? `${pageCount} pages` : "Loading..."}</span>}
                 </div>
 
                 <div style={styles.toolbarCenter}>
@@ -163,7 +157,7 @@ export default function PDFViewer({
                         <ChevronLeft size={16} />
                     </button>
                     <span style={styles.pageLabel}>
-                        Page <strong>{currentPage}</strong> of {pageCount}
+                        Page <strong>{currentPage}</strong> of {pageCount > 0 ? pageCount : "?"}
                     </span>
                     <button
                         style={styles.navBtn}

@@ -455,10 +455,17 @@ class EnhancedFinancialPDFExtractor:
             if FITZ_OK:
                 fitz_doc = fitz.open(pdf_path)
                 if fitz_doc.is_encrypted:
-                    fitz_doc.authenticate(self.password or "")
+                    if not fitz_doc.authenticate(self.password or ""):
+                        raise ValueError("Incorrect PDF password")
 
             if PDFPLUMBER_OK:
-                plumber_pdf = pdfplumber.open(pdf_path, password=self.password or '')
+                try:
+                    plumber_pdf = pdfplumber.open(pdf_path, password=self.password or '')
+                except Exception as e:
+                    if "Password" in str(e) or "password" in str(e):
+                        raise ValueError("Incorrect PDF password")
+                    else:
+                        raise
 
             n_fitz = len(fitz_doc) if fitz_doc else 0
             n_plum = len(plumber_pdf.pages) if plumber_pdf else 0
@@ -492,6 +499,10 @@ class EnhancedFinancialPDFExtractor:
                 sep = ('' if page_num == 0 else '\n') + '=' * 80 + f'\nPAGE {page_num+1}\n' + '=' * 80 + '\n'
                 pages_text.append(sep + '\n'.join(lines))
 
+        except ValueError as exc:
+            if "Incorrect PDF password" in str(exc):
+                raise
+            logger.error("Error extracting %s: %s", pdf_path, exc, exc_info=True)
         except Exception as exc:
             logger.error("Error extracting %s: %s", pdf_path, exc, exc_info=True)
         finally:

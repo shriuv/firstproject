@@ -21,14 +21,22 @@ const STAGE_META = {
     PARSING_TRANSACTIONS: { label: "Parsing Transactions", sub: "Running Code + LLM extraction pipeline...", color: "var(--primary-action)", pct: 78 },
     PARSING_TRANSACTIONS_CODE: { label: "Extracting Transactions", sub: "Format found in DB — using stored extraction logic (fast path)...", color: "var(--accent-color)", pct: 68 },
     AWAITING_REVIEW: { label: "Finalizing", sub: "Validating transactions and preparing review...", color: "var(--accent-color)", pct: 100 },
+    ERROR: { label: "Extraction Failed", sub: "Please check the file if it's protected or corrupted.", color: "#F87171", pct: 100 },
+    FAILED: { label: "Extraction Failed", sub: "Please check the file if it's protected or corrupted.", color: "#F87171", pct: 100 },
 };
 
-function CircularProgress({ processingStatus, status, elapsedSeconds, parsedType }) {
+function CircularProgress({ processingStatus, status, elapsedSeconds, parsedType, pipelineError }) {
     let currentKey = processingStatus || status;
     if (currentKey === "PARSING_TRANSACTIONS" && parsedType === "CODE") {
         currentKey = "PARSING_TRANSACTIONS_CODE";
     }
-    const meta = STAGE_META[currentKey] || STAGE_META["PROCESSING"];
+    
+    // Create a copy of the meta so we can safely modify it if needed
+    const meta = { ...(STAGE_META[currentKey] || STAGE_META["PROCESSING"]) };
+    
+    if (pipelineError && pipelineError.includes("Incorrect PDF password")) {
+        meta.sub = "Incorrect Password, Please Try Again.";
+    }
     
     // Simulate a sub-process percentage that climbs but never hits 100% prematurely
     const [subPct, setSubPct] = useState(0);
@@ -79,14 +87,16 @@ function CircularProgress({ processingStatus, status, elapsedSeconds, parsedType
             <div style={{ textAlign: "center" }}>
                 <div style={{ fontSize: "0.9rem", fontWeight: 800, color: "var(--text-primary)" }}>{meta.label}</div>
                 <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", maxWidth: 280 }}>
-                    <span style={{ fontWeight: 700, color: "var(--primary-action)", marginRight: '4px' }}>
-                        ({Math.round(subPct)}% completed)
-                    </span> 
+                    {!(currentKey === "ERROR" || currentKey === "FAILED") && (
+                        <span style={{ fontWeight: 700, color: "var(--primary-action)", marginRight: '4px' }}>
+                            ({Math.round(subPct)}% completed)
+                        </span>
+                    )}
                     {meta.sub}
                 </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.7rem", color: "var(--text-secondary)" }}>
-                <Clock size={12} /> {elapsedSeconds}s elapsed
+                <Clock size={12} /> {elapsedSeconds}s {currentKey === "ERROR" || currentKey === "FAILED" ? "remaining" : "elapsed"}
             </div>
         </div>
     );
@@ -315,6 +325,7 @@ export default function ParsingPage() {
                                 status={activeDoc.status}
                                 elapsedSeconds={activeDoc.elapsedSeconds}
                                 parsedType={activeDoc.parsedType}
+                                pipelineError={activeDoc.pipelineError}
                             />
                         )}
                         {!isExtracting && activeDoc.status === "DONE" && (

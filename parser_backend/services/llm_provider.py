@@ -24,7 +24,6 @@ logger = logging.getLogger("ledgerai.llm_provider")
 
 # Gemini model names → OpenRouter equivalents
 _GEMINI_TO_OPENROUTER = {
-    "models/gemini-3.1-flash-lite-preview": "google/gemini-2.0-flash-001",
     "models/gemini-2.5-flash":        "google/gemini-2.5-flash-preview",
     "models/gemini-2.5-flash-latest": "google/gemini-2.5-flash-preview",
     "models/gemini-2.0-flash":        "google/gemini-2.0-flash-001",

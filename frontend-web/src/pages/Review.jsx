@@ -1101,24 +1101,34 @@ export default function ReviewPage() {
                     </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
-                    {[
-                        { label: 'Transactions', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).length, color: 'var(--primary-action)' },
-                        { label: 'Credits', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => (t.credit || 0) > 0).length, color: '#059669' },
-                        { label: 'Debits', value: (activeParser === "CODE" ? editableCodeTxns : editableLlmTxns).filter(t => (t.debit || 0) > 0).length, color: '#e11d48' }
-                    ].map((stat, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{stat.label}</div>
-                            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: stat.color }}>{stat.value}</div>
-                        </div>
-                    ))}
+                <div style={{ display: 'flex', gap: '2.5rem', alignItems: 'center' }}>
+                    {(() => {
+                        const currentTxns = activeParser === "CODE" ? editableCodeTxns : editableLlmTxns;
+                        const creditTxns = currentTxns.filter(t => (t.credit || 0) > 0);
+                        const debitTxns = currentTxns.filter(t => (t.debit || 0) > 0);
+                        const totalCreditAmount = creditTxns.reduce((sum, t) => sum + (t.credit || 0), 0);
+                        const totalDebitAmount = debitTxns.reduce((sum, t) => sum + (t.debit || 0), 0);
+                        
+                        const formatMoney = (val) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(val);
+
+                        return [
+                            { label: `Total Transactions (${currentTxns.length})`, value: formatMoney(totalCreditAmount + totalDebitAmount), color: 'var(--primary-action)' },
+                            { label: `Total Credit (${creditTxns.length})`, value: formatMoney(totalCreditAmount), color: '#059669' },
+                            { label: `Total Debit (${debitTxns.length})`, value: formatMoney(totalDebitAmount), color: '#e11d48' }
+                        ].map((stat, i) => (
+                            <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                                <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{stat.label}</div>
+                                <div style={{ fontSize: '0.85rem', fontWeight: 700, color: stat.color }}>{stat.value}</div>
+                            </div>
+                        ));
+                    })()}
                 </div>
             </div>
 
             {/* Main 50-50 Split Layout */}
             <div style={{ display: 'flex', gap: '1rem', alignItems: 'flex-start' }}>
                 {/* Left Column: PDF Viewer (Strict 50%) */}
-                <div style={{ width: 'calc(50% - 0.5rem)', position: 'sticky', top: '5.5rem', height: 'calc(100vh - 6.5rem)' }}>
+                <div style={{ width: 'calc(50% - 0.5rem)', position: 'sticky', top: '4rem', height: 'calc(100vh - 4rem)' }}>
                     <PDFViewer
                         documentId={documentId ? parseInt(documentId) : null}
                         transactions={pdfMapData}

@@ -359,7 +359,7 @@ async def get_document_status(document_id: int, user=Depends(get_current_user)):
     sb = get_client()
     result = (
         sb.table("documents")
-        .select("document_id, status, transaction_parsed_type, file_name")
+        .select("document_id, status, transaction_parsed_type, file_name, pipeline_error")
         .eq("document_id", document_id)
         .eq("user_id", user_id)
         .maybe_single()
@@ -1278,8 +1278,11 @@ async def get_pdf_page_image(document_id: int, page: int, user=Depends(get_curre
             tmp_path = tmp.name
 
         doc_fitz = fitz.open(tmp_path)
+        
         if doc_fitz.is_encrypted:
-            doc_fitz.authenticate(password or "")
+            auth_res = doc_fitz.authenticate(password or "")
+            if not auth_res:
+                raise HTTPException(status_code=403, detail="Invalid password or document is encrypted")
 
         page_idx = page - 1  # convert to 0-indexed
         if page_idx < 0 or page_idx >= len(doc_fitz):

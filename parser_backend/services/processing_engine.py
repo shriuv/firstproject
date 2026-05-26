@@ -536,7 +536,8 @@ def process_document(
         logger.error("Error: %s", e, exc_info=True)
         logger.error("═" * 70)
         try:
-            update_document_status(document_id, "FAILED")
+            sb = get_client()
+            sb.table("documents").update({"status": "FAILED", "pipeline_error": str(e)}).eq("document_id", document_id).execute()
             insert_audit(document_id, "FAILED", str(e))
         except Exception:
             logger.error("Failed to update failure status for doc %s", document_id, exc_info=True)

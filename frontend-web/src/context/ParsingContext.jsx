@@ -56,7 +56,22 @@ export const ParsingProvider = ({ children }) => {
 
             if (timerRef.current) clearInterval(timerRef.current);
             timerRef.current = setInterval(() => {
-                setActiveDoc(prev => prev ? { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 } : null);
+                setActiveDoc(prev => {
+                    if (!prev) return null;
+                    if (prev.status === "ERROR" || prev.status === "FAILED" || prev.processingStatus === "FAILED") {
+                        const nextSec = prev.elapsedSeconds - 1;
+                        if (nextSec <= 0) {
+                            setIsExtracting(false);
+                            if (timerRef.current) {
+                                clearInterval(timerRef.current);
+                                timerRef.current = null;
+                            }
+                            return null;
+                        }
+                        return { ...prev, elapsedSeconds: nextSec };
+                    }
+                    return { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 };
+                });
             }, 1000);
 
             startPolling(docId, file.name);
@@ -74,13 +89,14 @@ export const ParsingProvider = ({ children }) => {
         pollRef.current = setInterval(async () => {
             try {
                 const statusRes = await API.get(`/documents/status/${docId}`);
-                const { status: docStatus, transaction_parsed_type: docParsedType } = statusRes.data;
+                const { status: docStatus, transaction_parsed_type: docParsedType, pipeline_error: pipelineError } = statusRes.data;
 
                 setActiveDoc(prev => {
                     const newDoc = {
                         ...prev,
                         processingStatus: docStatus,
-                        parsedType: docParsedType || prev?.parsedType
+                        parsedType: docParsedType || prev?.parsedType,
+                        pipelineError: pipelineError
                     };
 
                     // Update global progress gate
@@ -101,13 +117,28 @@ export const ParsingProvider = ({ children }) => {
                         docId: docId
                     });
                 } else if (docStatus === "FAILED") {
-                    stopPolling(docId, "ERROR");
-                    setNotification({
-                        type: 'error',
-                        title: 'Extraction Failed',
-                        message: `Failed to process "${fileName}". Please check the file if it's protected or corrupted.`,
-                        docId: docId
-                    });
+                    if (pollRef.current) {
+                        clearInterval(pollRef.current);
+                        pollRef.current = null;
+                    }
+                    setLatestFinishedDocId(docId);
+                    setActiveDoc(prev => prev ? { 
+                        ...prev, 
+                        status: "ERROR", 
+                        processingStatus: "FAILED",
+                        pipelineError: pipelineError,
+                        elapsedSeconds: Math.max(5, prev.elapsedSeconds)
+                    } : null);
+                    
+                    const isIncorrectPassword = pipelineError && pipelineError.includes("Incorrect PDF password");
+                    if (!isIncorrectPassword) {
+                        setNotification({
+                            type: 'error',
+                            title: 'Extraction Failed',
+                            message: `Failed to process "${fileName}". Please check the file if it's protected or corrupted.`,
+                            docId: docId
+                        });
+                    }
                 }
             } catch (err) {
                 console.error("Polling error", err);
@@ -129,7 +160,22 @@ export const ParsingProvider = ({ children }) => {
 
         if (timerRef.current) clearInterval(timerRef.current);
         timerRef.current = setInterval(() => {
-            setActiveDoc(prev => prev ? { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 } : null);
+            setActiveDoc(prev => {
+                if (!prev) return null;
+                if (prev.status === "ERROR" || prev.status === "FAILED" || prev.processingStatus === "FAILED") {
+                    const nextSec = prev.elapsedSeconds - 1;
+                    if (nextSec <= 0) {
+                        setIsExtracting(false);
+                        if (timerRef.current) {
+                            clearInterval(timerRef.current);
+                            timerRef.current = null;
+                        }
+                        return null;
+                    }
+                    return { ...prev, elapsedSeconds: nextSec };
+                }
+                return { ...prev, elapsedSeconds: prev.elapsedSeconds + 1 };
+            });
         }, 1000);
 
         startPolling(docId, fileName);
