@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { motion } from "framer-motion";
 import {
     FileUp, CheckCircle, Loader2, AlertCircle, Search, Cpu, List, Lock,
-    FileText, Clock, ChevronDown, Table as TableIcon, Trash2, RotateCcw, Code, Eye, EyeOff, ScrollText
+    FileText, Clock, ChevronDown, Table as TableIcon, Trash2, RotateCcw, Code, Eye, EyeOff, ScrollText, CloudUpload
 } from "lucide-react";
 // import API from "../api/api";
 import API from "../api/api";
@@ -115,6 +115,8 @@ export default function ParsingPage() {
     const [status, setStatus] = useState("IDLE");
     const [error, setError] = useState("");
     const fileInputRef = useRef(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [isHovered, setIsHovered] = useState(false);
 
     const [stats, setStats] = useState({ total: 0, parsed: 0, failed: 0, pending_review: 0 });
     const [recentDocs, setRecentDocs] = useState([]);
@@ -232,8 +234,7 @@ export default function ParsingPage() {
         return "pending";
     };
 
-    const onFileChange = async (e) => {
-        const selectedFile = e.target.files[0];
+    const handleFileSelection = async (selectedFile) => {
         if (!selectedFile) return;
         setFile(selectedFile);
         setError("");
@@ -264,6 +265,33 @@ export default function ParsingPage() {
         }
     };
 
+    const onFileChange = (e) => {
+        handleFileSelection(e.target.files[0]);
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragging(true);
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            const selectedFile = e.dataTransfer.files[0];
+            if (selectedFile.type === "application/pdf" || selectedFile.name.toLowerCase().endsWith('.pdf')) {
+                handleFileSelection(selectedFile);
+            } else {
+                setError("Please upload a valid PDF file.");
+            }
+        }
+    };
+
     const handleUpload = async () => {
         if (!file) return;
         try {
@@ -280,21 +308,25 @@ export default function ParsingPage() {
     };
 
     return (
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} style={{ padding: '16px 32px' }}>
-            <div className="overview-header" style={{ marginBottom: '24px' }}>
-                <h1 style={{ fontSize: '24px', margin: 0 }}>Parsing</h1>
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} style={{ padding: '32px 40px' }}>
+            <div className="overview-header" style={{ marginTop: '-32px', paddingTop: '32px', zIndex: 100 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                    <h1>Parsing</h1>
+                    <div style={{ width: '1px', height: '24px', background: 'var(--border-color)' }}></div>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>Upload and extract transactions from your statements.</span>
+                </div>
             </div>
 
-            <div style={{ display: 'flex', gap: '2rem', alignItems: 'stretch', marginBottom: '3rem' }}>
-                <div className="upload-page-card" style={{
-                    flex: '1.5',
-                    background: 'var(--bg-secondary)',
-                    padding: '2.5rem 2rem',
-                    borderRadius: '16px',
-                    border: '1px solid var(--border-color)',
-                    position: 'relative',
-                    minWidth: 0
-                }}>
+            <div className="upload-page-card" style={{
+                background: 'var(--bg-secondary)',
+                padding: '2.5rem 2rem',
+                borderRadius: '16px',
+                marginBottom: '2.5rem',
+                border: '1px solid var(--border-color)',
+                maxWidth: '860px',
+                margin: '0 auto 2.5rem',
+                position: 'relative'
+            }}>
                 {activeDoc && (
                     <div style={{ marginBottom: '1.5rem' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '1.5rem' }}>
@@ -341,9 +373,14 @@ export default function ParsingPage() {
                     <>
                         <div className="dropzone"
                             onClick={() => fileInputRef.current.click()}
+                            onDragOver={handleDragOver}
+                            onDragLeave={handleDragLeave}
+                            onDrop={handleDrop}
+                            onMouseEnter={() => setIsHovered(true)}
+                            onMouseLeave={() => setIsHovered(false)}
                             style={{
                                 minHeight: '180px',
-                                border: '2px dashed var(--border-color)',
+                                border: isDragging || isHovered ? '2px dashed var(--primary-action)' : '2px dashed var(--border-color)',
                                 borderRadius: '12px',
                                 display: 'flex',
                                 flexDirection: 'column',
@@ -351,17 +388,21 @@ export default function ParsingPage() {
                                 justifyContent: 'center',
                                 padding: '1.5rem',
                                 transition: 'all 0.2s ease',
-                                background: file ? 'rgba(99, 102, 241, 0.03)' : 'transparent',
+                                background: isDragging || isHovered ? 'rgba(99, 102, 241, 0.05)' : (file ? 'rgba(99, 102, 241, 0.03)' : 'transparent'),
                                 cursor: 'pointer'
                             }}
                         >
                             <input type="file" hidden ref={fileInputRef} onChange={onFileChange} accept=".pdf" />
 
                             {!file ? (
-                                <div style={{ textAlign: 'center' }}>
-                                    <FileUp size={40} style={{ color: 'var(--primary-action)', marginBottom: '0.75rem' }} />
-                                    <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Choose PDF Statement</div>
-                                    <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)' }}>Maximum 50MB per file</div>
+                                <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                                    <CloudUpload size={48} style={{ color: isDragging || isHovered ? 'var(--primary-action)' : '#9CA3AF', marginBottom: '1rem', transition: 'color 0.2s' }} />
+                                    <div style={{ fontSize: '1.25rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.5rem' }}>Drop your PDF here</div>
+                                    <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>or click anywhere in this box to browse</div>
+                                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '0.75rem 1.5rem', background: 'transparent', border: isDragging || isHovered ? '1px solid var(--primary-action)' : '1px solid var(--border-color)', borderRadius: '8px', color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.9rem', transition: 'border-color 0.2s' }}>
+                                        <FileText size={16} color="#EF4444" />
+                                        Select PDF Statement
+                                    </div>
                                 </div>
                             ) : (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: 'var(--bg-primary)', padding: '10px 16px', borderRadius: '10px', border: '1px solid var(--border-color)', position: 'relative' }}>
@@ -439,8 +480,8 @@ export default function ParsingPage() {
                 )}
             </div>
 
-            <div id="parsing-summary" style={{ flex: '1', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1.5rem', alignContent: 'start' }}>
-                <div style={{ background: 'var(--card-bg)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
+            <div id="parsing-summary" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1.5rem', marginBottom: '3rem' }}>
+                <div style={{ background: 'var(--bg-secondary)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
                     <div style={{ padding: '0.75rem', background: 'rgba(72, 62, 168, 0.08)', borderRadius: '14px', color: 'var(--primary-action)' }}>
                         <ScrollText size={24} />
                     </div>
@@ -450,7 +491,7 @@ export default function ParsingPage() {
                     </div>
                 </div>
                 
-                <div style={{ background: 'var(--card-bg)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
+                <div style={{ background: 'var(--bg-secondary)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
                     <div style={{ padding: '0.75rem', background: 'rgba(127, 175, 138, 0.1)', borderRadius: '14px', color: 'var(--accent-color)' }}>
                         <CheckCircle size={24} />
                     </div>
@@ -460,7 +501,7 @@ export default function ParsingPage() {
                     </div>
                 </div>
 
-                <div style={{ background: 'var(--card-bg)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
+                <div style={{ background: 'var(--bg-secondary)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
                     <div style={{ padding: '0.75rem', background: 'rgba(231, 76, 60, 0.1)', borderRadius: '14px', color: '#e74c3c' }}>
                         <AlertCircle size={24} />
                     </div>
@@ -470,7 +511,7 @@ export default function ParsingPage() {
                     </div>
                 </div>
 
-                <div style={{ background: 'var(--card-bg)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
+                <div style={{ background: 'var(--bg-secondary)', borderRadius: '20px', padding: '1.5rem', display: 'flex', alignItems: 'center', gap: '1.25rem', border: '1px solid var(--border-color)', boxShadow: '0 4px 12px rgba(0,0,0,0.03)' }}>
                     <div style={{ padding: '0.75rem', background: 'rgba(243, 156, 18, 0.1)', borderRadius: '14px', color: '#f39c12' }}>
                         <Clock size={24} />
                     </div>
@@ -479,7 +520,6 @@ export default function ParsingPage() {
                         <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-primary)' }}>{stats.pending_review || 0}</div>
                     </div>
                 </div>
-            </div>
             </div>
 
             {/* Sort and Search Only */}
@@ -552,7 +592,7 @@ export default function ParsingPage() {
 
             <div style={{ background: 'var(--bg-secondary)', borderRadius: '16px', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead><tr style={{ background: 'var(--bg-primary)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}><th style={{ padding: '1rem 2rem', textAlign: 'left' }}>File Name</th><th style={{ padding: '1rem' }}>Status</th><th style={{ padding: '1rem' }}>Type</th><th style={{ padding: '1rem' }}>Activity</th><th style={{ padding: '1rem 2rem' }}>Actions</th></tr></thead>
+                    <thead><tr style={{ background: 'rgba(0, 0, 0, 0.1)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}><th style={{ padding: '1rem 2rem', textAlign: 'left' }}>File Name</th><th style={{ padding: '1rem' }}>Status</th><th style={{ padding: '1rem' }}>Type</th><th style={{ padding: '1rem' }}>Activity</th><th style={{ padding: '1rem 2rem' }}>Actions</th></tr></thead>
                     <tbody>
                         {isLoading ? <tr><td colSpan="5" style={{ textAlign: 'center', padding: '2rem' }}><Loader2 className="spin-icon" size={24} color="#483EA8" /></td></tr> : recentDocs.map(doc => (
                             <tr key={doc.document_id} style={{ borderTop: '1px solid var(--border-color)', fontSize: '0.9rem' }}>
@@ -711,7 +751,6 @@ export default function ParsingPage() {
                             border: '1px solid var(--border-color)',
                             background: 'var(--bg-secondary)',
                             color: currentPage === totalPages ? 'var(--text-secondary)' : 'var(--primary-action)',
-                            // fontWeight: 700,
                             fontWeight: 700,
                             cursor: currentPage === totalPages ? 'not-allowed' : 'pointer',
                             opacity: currentPage === totalPages ? 0.5 : 1,

@@ -405,7 +405,11 @@ const Overview = () => {
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="overview-container">
       <div className="overview-header">
-        <h1>Overview Dashboard</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <h1>Overview Dashboard</h1>
+          <div style={{ width: '1px', height: '24px', background: 'var(--border-color)' }}></div>
+          <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: 500 }}>View your financial summary and key metrics.</span>
+        </div>
         <div className="header-filters" style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           {accounts.length > 0 && (
             <select

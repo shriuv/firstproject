@@ -1216,8 +1216,10 @@ export default function ReviewPage() {
                                 )}
                             </div>
                             <button 
-                                disabled={!selectedAccountId || isApproved || isLinkingAccount || accountLinked} 
-                                onClick={handleLinkAccount}
+                                onClick={(e) => {
+                                    if (!selectedAccountId || isApproved || isLinkingAccount || accountLinked) return;
+                                    handleLinkAccount();
+                                }}
                                 style={{ 
                                     padding: '10px 20px', 
                                     background: (accountLinked || isApproved) ? 'transparent' : (selectedAccountId ? 'var(--primary-action)' : 'white'), 
@@ -1226,12 +1228,18 @@ export default function ReviewPage() {
                                     borderRadius: '10px', 
                                     fontWeight: 600, 
                                     fontSize: '0.85rem',
-                                    cursor: (!selectedAccountId || isApproved || accountLinked) ? 'default' : 'pointer',
+                                    cursor: 'pointer',
                                     boxShadow: (selectedAccountId && !accountLinked && !isApproved) ? '0 4px 12px rgba(72, 62, 168, 0.2)' : 'none',
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '6px',
                                     transition: 'all 0.3s ease'
+                                }}
+                                onMouseEnter={(e) => {
+                                    if (!selectedAccountId && !accountLinked && !isApproved) e.currentTarget.style.background = '#f1f5f9';
+                                }}
+                                onMouseLeave={(e) => {
+                                    if (!selectedAccountId && !accountLinked && !isApproved) e.currentTarget.style.background = 'white';
                                 }}
                             >
                                 {isLinkingAccount ? (
@@ -1257,8 +1265,10 @@ export default function ReviewPage() {
                             </h2>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                 <button 
-                                    onClick={handleApprove}
-                                    disabled={!accountLinked || isApproving || isApproved}
+                                    onClick={(e) => {
+                                        if (!accountLinked || isApproving || isApproved) return;
+                                        handleApprove();
+                                    }}
                                     style={{ 
                                         padding: '8px 20px', 
                                         borderRadius: '8px', 
@@ -1267,12 +1277,18 @@ export default function ReviewPage() {
                                         border: isApproved ? '1px solid var(--accent-color)' : (accountLinked ? '1px solid var(--primary-action)' : '1px solid #cbd5e1'), 
                                         fontSize: '0.85rem', 
                                         fontWeight: 600, 
-                                        cursor: (!accountLinked || isApproving || isApproved) ? 'not-allowed' : 'pointer', 
+                                        cursor: 'pointer', 
                                         display: 'flex', 
                                         alignItems: 'center', 
                                         gap: '6px', 
                                         transition: 'all 0.3s ease',
                                         boxShadow: (!accountLinked || isApproved) ? 'none' : '0 4px 12px rgba(72, 62, 168, 0.25)'
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        if (!accountLinked && !isApproved) e.currentTarget.style.background = '#f1f5f9';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        if (!accountLinked && !isApproved) e.currentTarget.style.background = 'white';
                                     }}
                                 >
                                     {isApproving ? <Loader2 size={14} className="spin-icon" /> : <Check size={14} />}
