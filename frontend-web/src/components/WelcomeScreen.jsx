@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../shared/supabase';
+import { useUser } from '../context/UserContext';
 import '../styles/WelcomeScreen.css';
 
 const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
+  const user = useUser();
   const [userFullName, setUserFullName] = useState('User');
   const [profileType, setProfileType] = useState('INDIVIDUAL'); // INDIVIDUAL or BUSINESS
   const [modules, setModules] = useState([]);
@@ -13,7 +15,6 @@ const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
     const fetchInitialData = async () => {
       try {
         setLoading(true);
-        const { data: { user } } = await supabase.auth.getUser();
 
         if (user) {
           if (user.user_metadata?.full_name) {
@@ -69,7 +70,6 @@ const WelcomeScreen = ({ toggleTheme, isDarkMode, onSetupComplete }) => {
 
     try {
       setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("User session expired");
 
       // 1. Get the Core Module ID

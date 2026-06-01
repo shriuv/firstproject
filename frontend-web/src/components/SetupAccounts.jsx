@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../shared/supabase';
+import { useUser } from '../context/UserContext';
 import '../styles/SetupAccounts.css';
 
 const PARENT_NAMES = {
@@ -9,6 +10,7 @@ const PARENT_NAMES = {
 };
 
 const SetupAccounts = ({ onSetupAccountsComplete }) => {
+  const user = useUser();
   const [accounts, setAccounts] = useState([]); // Array of forms currently active
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -60,7 +62,6 @@ const SetupAccounts = ({ onSetupAccountsComplete }) => {
     setError('');
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("No authenticated user found.");
 
       // Validate that at least ONE Bank Account is added

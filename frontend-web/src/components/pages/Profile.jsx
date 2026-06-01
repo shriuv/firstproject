@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../../shared/supabase';
+import { useUser } from '../../context/UserContext';
 import { ICONS } from '../Icons';
 import '../../styles/Profile.css';
 
 const Profile = () => {
+  const user = useUser();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -31,7 +33,6 @@ const Profile = () => {
   const fetchProfile = async () => {
     try {
       setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const fullName = user.user_metadata?.full_name || '';

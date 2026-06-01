@@ -3,6 +3,8 @@ import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import AccountPickerModal from '../AccountPickerModal';
 import { Toast, useToast } from '../Toast';
 import { supabase } from '../../shared/supabase';
+import { useUser } from '../../context/UserContext';
+import { useData } from '../../context/DataContext';
 import { ICONS } from '../Icons';
 import '../../styles/Transactions.css';
 import API from '../../api/api';
@@ -189,6 +191,11 @@ const OffsetAccountTree = ({ accounts, selectedIds, onToggle, searchQuery = '' }
 const Transactions = () => {
   const navigate = useNavigate();
   const location = useLocation();  // read nav state BEFORE lazy useState inits below
+  const user = useUser();
+  const { transactions, setTransactions, transactionsLoading: loading,
+          refreshTransactions, accounts: contextAccounts,
+          hasMoreTransactions, loadMoreTransactions } = useData();
+  const [isMoreLoading, setIsMoreLoading] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const { toasts, showToast } = useToast();
   const [isCategorizing, setIsCategorizing] = useState(() => {
@@ -198,8 +205,7 @@ const Transactions = () => {
     return localStorage.getItem('categoriseStatus') || '';
   });
   const [isApprovingBulk, setIsApprovingBulk] = useState(false);
-  const [transactions, setTransactions] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // transactions, loading come from DataContext
   const [activeFilter, setActiveFilter] = useState('ALL');
   const [recatTarget, setRecatTarget] = useState(null);
   const [manualTarget, setManualTarget] = useState(null);
@@ -207,7 +213,8 @@ const Transactions = () => {
   const [approvingIds, setApprovingIds] = useState(new Set());
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [correctingId, setCorrectingId] = useState(null);
-  const [cachedAccounts, setCachedAccounts] = useState([]);
+  // cachedAccounts: active accounts for AccountPickerModal — derived from context
+  // filterAccounts/filterDocuments: derived from context transactions via useMemo below
 
   // ── Pipeline processing state — documents being auto-categorised ————————
   const [processingDocIds, setProcessingDocIds] = useState(new Set());
@@ -274,8 +281,7 @@ const Transactions = () => {
   // ── Filter popup state ────────────────────────────────────────
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const filterRef = useRef(null);
-  const [filterAccounts, setFilterAccounts] = useState([]); // { account_id, account_name }
-  const [filterDocuments, setFilterDocuments] = useState([]); // { document_id, file_name }
+
   const [selectedAccountIds, setSelectedAccountIds] = useState(() => {
     // Seeded from Accounts page navigation state (srcAccId = bank/CC account)
     const id = location.state?.srcAccId;
@@ -342,188 +348,124 @@ const Transactions = () => {
     setDateRange({ start, end });
   };
 
-  const fetchTransactions = async (currentFilter = activeFilter, silent = false) => {
-    if (!silent) setLoading(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data, error } = await supabase
-        .from('uncategorized_transactions')
-        .select(`
-          uncategorized_transaction_id,
-          txn_date,
-          details,
-          debit,
-          credit,
-          document_id,
-          account_id,
-          group_id,
-          source_account:account_id ( account_id, account_name ),
-          source_document:document_id ( document_id, file_name ),
-          transactions!uncategorized_transaction_id (
-            transaction_id,
-            review_status,
-            attention_level,
-            offset_account_id,
-            categorised_by,
-            is_uncategorised,
-            user_note,
-            accounts:offset_account_id (
-              account_name
-            )
-          )
-        `)
-        .eq('user_id', user.id)
-        .order('txn_date', { ascending: false });
-
-      if (error) throw error;
-
-      setTransactions(data || []);
-
-      // ── Check which documents are still being processed by the auto-pipeline
-      const docIds = [...new Set((data || []).map(t => t.document_id).filter(Boolean))];
-      if (docIds.length > 0) {
-        const { data: docStatuses } = await supabase
-          .from('documents')
-          .select('document_id, grouping_status, pipeline_started_at, created_at')
-          .in('document_id', docIds);
-
-        const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;     // 5 min: running but no finish
-        const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min: never started (backend asleep)
-        const stillProcessing = new Set();
-        const failed = new Set();
-        const startedAts = [];
-        let errorHint = '';
-
-        for (const doc of docStatuses || []) {
-          if (doc.grouping_status === 'pipeline_done') continue;
-          if (doc.grouping_status === 'pipeline_failed') {
-            failed.add(doc.document_id);
-            errorHint = 'pipeline_failed';
-            continue;
-          }
-
-          // Case 1: pipeline_started_at is NULL — backend was asleep and never picked this up
-          const neverStarted = (
-            !doc.pipeline_started_at &&
-            doc.created_at &&
-            (doc.grouping_status === 'done' || doc.grouping_status === 'pending') &&
-            Date.now() - new Date(doc.created_at).getTime() > NULL_PIPELINE_TIMEOUT_MS
-          );
-
-          // Case 2: pipeline started but timed out
-          const isStale = (
-            (doc.grouping_status === 'pipeline_running' || doc.grouping_status === 'done' || doc.grouping_status === 'pending') &&
-            doc.pipeline_started_at &&
-            Date.now() - new Date(doc.pipeline_started_at).getTime() > PIPELINE_TIMEOUT_MS
-          );
-
-          if (neverStarted) {
-            failed.add(doc.document_id);
-            errorHint = errorHint || 'never_started';
-            continue;
-          }
-
-          if (isStale) {
-            failed.add(doc.document_id);
-            errorHint = errorHint || 'stale';
-            continue;
-          }
-          stillProcessing.add(doc.document_id);
-          if (doc.pipeline_started_at) startedAts.push(new Date(doc.pipeline_started_at).getTime());
-        }
-
-        if (errorHint) setPipelineErrorMsg(errorHint);
-
-        // Capture the earliest started_at so the progress bar knows when processing began
-        if (startedAts.length > 0) {
-          setPipelineStartedAt(prev => prev ?? Math.min(...startedAts));
-        }
-
-        setProcessingDocIds(stillProcessing);
-        setFailedDocIds(failed);
-      } else {
-        setProcessingDocIds(new Set());
-        setFailedDocIds(new Set());
-      }
-
-      // Auto-select LOW attention when filtering to PENDING_APP
-      if (currentFilter === 'PENDING_APP') {
-        const lowAttentionIds = new Set();
-        (data || []).forEach((txn) => {
-          const isCategorised = txn.transactions && txn.transactions.length > 0;
-          if (isCategorised && txn.transactions[0].review_status === 'PENDING') {
-            const isUncategorised = txn.transactions[0].is_uncategorised;
-            if (txn.transactions[0].attention_level === 'LOW' && !isUncategorised) {
-              lowAttentionIds.add(txn.transactions[0].transaction_id);
-            }
-          }
-        });
-        setSelectedIds(lowAttentionIds);
-      }
-    } catch (err) {
-      console.error('Fetch transactions failed:', err);
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  };
-
-  // Populate filter options once on mount
+  // ── Pipeline-status seeding (re-runs when context transactions load fresh) ──
   useEffect(() => {
-    fetchTransactions('ALL');
+    if (loading || transactions.length === 0) return;
 
-    // Check if categorization was running when user left - show notification
+    // Check which documents are still being processed by the auto-pipeline
+    const docIds = [...new Set(transactions.map(t => t.document_id).filter(Boolean))];
+    if (docIds.length > 0) {
+      (async () => {
+        try {
+          const { data: docStatuses } = await supabase
+            .from('documents')
+            .select('document_id, grouping_status, pipeline_started_at, created_at')
+            .in('document_id', docIds);
+
+          const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000;     // 5 min: running but no finish
+          const NULL_PIPELINE_TIMEOUT_MS = 3 * 60 * 1000; // 3 min: never started (backend asleep)
+          const stillProcessing = new Set();
+          const failed = new Set();
+          const startedAts = [];
+          let errorHint = '';
+
+          for (const doc of docStatuses || []) {
+            if (doc.grouping_status === 'pipeline_done') continue;
+            if (doc.grouping_status === 'pipeline_failed') {
+              failed.add(doc.document_id);
+              errorHint = 'pipeline_failed';
+              continue;
+            }
+
+            const neverStarted = (
+              !doc.pipeline_started_at &&
+              doc.created_at &&
+              (doc.grouping_status === 'done' || doc.grouping_status === 'pending') &&
+              Date.now() - new Date(doc.created_at).getTime() > NULL_PIPELINE_TIMEOUT_MS
+            );
+
+            const isStale = (
+              (doc.grouping_status === 'pipeline_running' || doc.grouping_status === 'done' || doc.grouping_status === 'pending') &&
+              doc.pipeline_started_at &&
+              Date.now() - new Date(doc.pipeline_started_at).getTime() > PIPELINE_TIMEOUT_MS
+            );
+
+            if (neverStarted) {
+              failed.add(doc.document_id);
+              errorHint = errorHint || 'never_started';
+              continue;
+            }
+
+            if (isStale) {
+              failed.add(doc.document_id);
+              errorHint = errorHint || 'stale';
+              continue;
+            }
+            stillProcessing.add(doc.document_id);
+            if (doc.pipeline_started_at) startedAts.push(new Date(doc.pipeline_started_at).getTime());
+          }
+
+          if (errorHint) setPipelineErrorMsg(errorHint);
+
+          if (startedAts.length > 0) {
+            setPipelineStartedAt(prev => prev ?? Math.min(...startedAts));
+          }
+
+          setProcessingDocIds(stillProcessing);
+          setFailedDocIds(failed);
+        } catch (err) {
+          console.error('Failed to seed pipeline status:', err);
+        }
+      })();
+    } else {
+      setProcessingDocIds(new Set());
+      setFailedDocIds(new Set());
+    }
+
+    // Auto-select LOW attention when filtering to PENDING_APP
+    if (activeFilter === 'PENDING_APP') {
+      const lowAttentionIds = new Set();
+      transactions.forEach((txn) => {
+        const isCategorised = txn.transactions && txn.transactions.length > 0;
+        if (isCategorised && txn.transactions[0].review_status === 'PENDING') {
+          const isUncategorised = txn.transactions[0].is_uncategorised;
+          if (txn.transactions[0].attention_level === 'LOW' && !isUncategorised) {
+            lowAttentionIds.add(txn.transactions[0].transaction_id);
+          }
+        }
+      });
+      setSelectedIds(lowAttentionIds);
+    }
+  }, [transactions, loading, activeFilter]);
+
+  // ── Derived Filter Options ──────────────────────────────────────────
+  const filterAccounts = React.useMemo(() => {
+    const accMap = {};
+    transactions.forEach(t => {
+      if (t.source_account) accMap[t.source_account.account_id] = t.source_account;
+    });
+    return Object.values(accMap);
+  }, [transactions]);
+
+  const filterDocuments = React.useMemo(() => {
+    const docMap = {};
+    transactions.forEach(t => {
+      if (t.source_document) docMap[t.source_document.document_id] = t.source_document;
+    });
+    return Object.values(docMap);
+  }, [transactions]);
+
+  const cachedAccounts = React.useMemo(() => {
+    return contextAccounts
+      .filter(a => a.is_active)
+      .sort((a, b) => a.account_type.localeCompare(b.account_type) || a.account_name.localeCompare(b.account_name));
+  }, [contextAccounts]);
+
+  // Notification on mount if categorizing is running
+  useEffect(() => {
     if (localStorage.getItem('isCategorizing') === 'true') {
       showToast('Categorization is still running in the background. You can continue using the app.', 'info');
     }
-
-    const loadFilterOptions = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      // Distinct accounts that appear in uncategorized_transactions
-      const { data: accData } = await supabase
-        .from('uncategorized_transactions')
-        .select('source_account:account_id ( account_id, account_name )')
-        .eq('user_id', user.id);
-
-      const { data: docData } = await supabase
-        .from('uncategorized_transactions')
-        .select('source_document:document_id ( document_id, file_name )')
-        .eq('user_id', user.id);
-
-      // De-duplicate
-      const accMap = {};
-      (accData || []).forEach(r => {
-        if (r.source_account) accMap[r.source_account.account_id] = r.source_account;
-      });
-      const docMap = {};
-      (docData || []).forEach(r => {
-        if (r.source_document) docMap[r.source_document.document_id] = r.source_document;
-      });
-
-      setFilterAccounts(Object.values(accMap));
-      setFilterDocuments(Object.values(docMap));
-    };
-
-    const loadAllAccounts = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data: acctData } = await supabase
-        .from('accounts')
-        .select('account_id, account_name, account_type, balance_nature, parent_account_id, is_active')
-        .eq('user_id', user.id)
-        .eq('is_active', true)
-        .order('account_type', { ascending: true })
-        .order('account_name', { ascending: true });
-
-      setCachedAccounts(acctData || []);
-    };
-
-    loadFilterOptions();
-    loadAllAccounts();
   }, []);
 
   // Clear the navigation state from history so the filter isn't re-applied
@@ -597,7 +539,7 @@ const Transactions = () => {
 
       if (stillProcessing.size === 0) {
         clearInterval(interval);
-        fetchTransactions(activeFilter, true); // silent refresh to show new rows
+        refreshTransactions(); // silent refresh to show new rows
       }
     }, 4000);
 
@@ -812,11 +754,11 @@ const Transactions = () => {
               localStorage.setItem('categoriseStatus', payload.message);
             }
             if (payload.flush) {
-              fetchTransactions(activeFilter, true);
+              refreshTransactions();
             }
             if (payload.done) {
               showToast('✅ Bulk categorise success!', 'success');
-              fetchTransactions(activeFilter, true);
+              refreshTransactions();
             }
             if (payload.type === 'error' || payload.error) {
               showToast(payload.message || 'Bulk categorisation failed', 'error');
@@ -1180,7 +1122,7 @@ const Transactions = () => {
         });
       }
 
-      fetchTransactions(activeFilter, true);
+      refreshTransactions();
     } catch (err) {
       showToast('Failed to confirm similar transactions', 'error');
     } finally {
@@ -1227,7 +1169,7 @@ const Transactions = () => {
             ? t.uncategorized_transaction_id !== txn.uncategorized_transaction_id
             : t.transaction_id !== txn.transaction_id
         );
-        if (remaining.length === 0) fetchTransactions(activeFilter, true);
+        if (remaining.length === 0) refreshTransactions();
         return remaining;
       });
 
@@ -1467,7 +1409,7 @@ const Transactions = () => {
       showToast('Transaction added successfully', 'success');
       setIsManualAddOpen(false);
       setManualAddForm(EMPTY_MANUAL_FORM);
-      fetchTransactions(activeFilter, true);
+      refreshTransactions();
     } catch {
       setManualAddError('Network error. Please try again.');
     } finally {
@@ -1483,7 +1425,7 @@ const Transactions = () => {
     setActiveReviewDocumentId(null);
     setPdfMapData([]);
     setPdfHighlightIndex(null);
-    fetchTransactions(activeFilter, true);
+    refreshTransactions();
   };
 
   /** Patch the editState for current card */
@@ -1776,7 +1718,6 @@ const Transactions = () => {
 
           if (preservedNote) {
             try {
-              const { data: { user } } = await supabase.auth.getUser();
               const { data: newTxn } = await supabase
                 .from('transactions')
                 .select('transaction_id')
@@ -2707,6 +2648,22 @@ const Transactions = () => {
                   })
                 )}
               </div>
+              
+              {hasMoreTransactions && !loading && (
+                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '20px', marginBottom: '20px' }}>
+                  <button 
+                    className="action-btn" 
+                    onClick={async () => {
+                      setIsMoreLoading(true);
+                      await loadMoreTransactions();
+                      setIsMoreLoading(false);
+                    }}
+                    disabled={isMoreLoading}
+                  >
+                    {isMoreLoading ? <><span className="spinner-small" style={{ borderColor: 'var(--text-secondary)', borderTopColor: 'transparent' }}></span> Loading...</> : 'Load more transactions'}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>

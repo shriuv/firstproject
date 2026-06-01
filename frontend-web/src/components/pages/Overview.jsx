@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../shared/supabase';
+import { useUser } from '../../context/UserContext';
+import { useData } from '../../context/DataContext';
 import { useNavigate } from 'react-router-dom';
 import '../../styles/Overview.css';
 import { formatDate } from '../../utils/dateUtils';
@@ -7,9 +9,11 @@ import { motion } from 'framer-motion';
 
 const Overview = () => {
   const navigate = useNavigate();
+  const user = useUser();
+  const { transactions: allTxnsRaw, transactionsLoading: txnsLoading } = useData();
   const chartScrollRef = useRef(null);
-  const [loading, setLoading] = useState(true);
-  const [allTxns, setAllTxns] = useState([]);
+  const [ledgerLoading, setLedgerLoading] = useState(true);
+  const loading = txnsLoading || ledgerLoading;
   const [accounts, setAccounts] = useState([]);
   const [selectedAccountId, setSelectedAccountId] = useState('ALL');
   const [timeframe, setTimeframe] = useState('MONTH');
@@ -66,8 +70,19 @@ const Overview = () => {
   };
 
   useEffect(() => {
-    fetchData();
+    fetchLedger();
   }, []);
+
+  // Derive accounts list from context transactions whenever they change
+  useEffect(() => {
+    const accsMap = {};
+    allTxnsRaw.forEach(txn => {
+      if (txn.account_id) {
+        accsMap[txn.account_id] = txn.source_account?.account_name || `Account ${String(txn.account_id).substring(0, 4)}`;
+      }
+    });
+    setAccounts(Object.keys(accsMap).map(id => ({ id, name: accsMap[id] })));
+  }, [allTxnsRaw]);
 
   useEffect(() => {
     if (Object.keys(globalLedgerMap).length === 0) return;
@@ -114,47 +129,11 @@ const Overview = () => {
     });
   }, [globalLedgerMap, selectedAccountId]);
 
-  const fetchData = async () => {
+  const fetchLedger = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      // ── 1. Fetch uncategorized_transactions for P&L widgets (income / expense / chart) ──
-      const { data, error } = await supabase
-        .from('uncategorized_transactions')
-        .select(`
-          uncategorized_transaction_id,
-          txn_date,
-          details,
-          debit,
-          credit,
-          document_id,
-          account_id,
-          source_document:document_id ( file_name ),
-          source_account:account_id ( account_name ),
-          transactions (
-             is_contra,
-             is_uncategorised,
-             accounts:offset_account_id ( account_name, account_type )
-          )
-        `)
-        .eq('user_id', user.id)
-        .order('txn_date', { ascending: false });
-
-      if (error) throw error;
-
-      const txns = data || [];
-      setAllTxns(txns);
-
-      const accsMap = {};
-      txns.forEach(txn => {
-        if (txn.account_id) {
-          accsMap[txn.account_id] = txn.source_account?.account_name || `Account ${String(txn.account_id).substring(0, 4)}`;
-        }
-      });
-      setAccounts(Object.keys(accsMap).map(id => ({ id, name: accsMap[id] })));
-
-      // ── 2. Fetch journal_entries for Assets & Liabilities ─────────────────────────────
+      // Fetch journal_entries for Assets & Liabilities
       // Cumulative fetch (no .gte filter) to get the actual account balances.
       const { data: ledgerEntries } = await supabase
         .from('journal_entries')
@@ -184,31 +163,18 @@ const Overview = () => {
         ledgerMap[account_id].totalCredit += entry.credit_amount || 0;
       });
 
-      // Catch-all / grouping account names to skip (matches Overview's existing filter)
-      const isCatchAll = (name) => {
-        const n = name.toLowerCase().trim();
-        return (
-          n.includes('uncategor') || n.includes('unclassif') || n.includes('suspense') ||
-          n.includes('opening bal') || n === 'assets' || n === 'liabilities' ||
-          n === 'current assets' || n === 'fixed assets' || n === 'non-current assets' ||
-          n === 'current liabilities' || n === 'long-term liabilities' ||
-          n === 'non-current liabilities' || n === 'other' || n === 'others' ||
-          n === 'miscellaneous' || n === 'misc' || n === 'general' || n === 'undefined' || n === 'unknown'
-        );
-      };
-
       // Save ledger map to state so it can be dynamically filtered
       setGlobalLedgerMap(ledgerMap);
 
     } catch (err) {
-      console.error('Error fetching overview data:', err);
+      console.error('Error fetching overview ledger data:', err);
     } finally {
-      setLoading(false);
+      setLedgerLoading(false);
     }
   };
 
   const { stats, topExpenses, incomeBreakdown, expenseBreakdown, assetsBreakdown, liabilitiesBreakdown, recentTxns, chartData, insights, mappedExpenses, donutColors } = React.useMemo(() => {
-    const txns = selectedAccountId === 'ALL' ? allTxns : allTxns.filter(t => String(t.account_id) === String(selectedAccountId));
+    const txns = selectedAccountId === 'ALL' ? allTxnsRaw : allTxnsRaw.filter(t => String(t.account_id) === String(selectedAccountId));
 
     let totalIncome = 0;
     let totalExpense = 0;
@@ -384,7 +350,7 @@ const Overview = () => {
       recentTxns: categorisedTxns.slice(0, 5),
       chartData: sortedMonths
     };
-  }, [allTxns, selectedAccountId, timeframe]);
+  }, [allTxnsRaw, selectedAccountId, timeframe]);
 
   useEffect(() => {
     if (chartScrollRef.current) {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { supabase } from '../shared/supabase';
+import { useUser } from '../context/UserContext';
 import AddAccountModal from './AddAccountModal';
 import '../styles/Accounts.css';
 import '../styles/OnboardingCoaReview.css';
@@ -213,6 +214,7 @@ const AccountNode = ({
 // OnboardingCoaReview — combined bank setup + category review
 // ─────────────────────────────────────────────────────────────────────────────
 const OnboardingCoaReview = ({ onSetupComplete }) => {
+  const user = useUser();
   const [accounts, setAccounts]       = useState([]);
   const [identifiers, setIdentifiers] = useState({});      // account_id → identifier row
   const [loading, setLoading]         = useState(true);
@@ -241,7 +243,6 @@ const OnboardingCoaReview = ({ onSetupComplete }) => {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const [{ data: accsData, error: accsErr }, { data: identData, error: identErr }] = await Promise.all([
@@ -316,7 +317,6 @@ const OnboardingCoaReview = ({ onSetupComplete }) => {
     if (!newName.trim()) return;
     setSavingId(accountId);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const { data: acc } = await supabase.from('accounts').select('is_system_generated').eq('account_id', accountId).single();
       if (acc?.is_system_generated) { alert('System accounts cannot be renamed.'); setSavingId(null); return; }
       const { error } = await supabase.from('accounts').update({ account_name: newName.trim() }).eq('account_id', accountId).eq('user_id', user.id);
@@ -332,7 +332,6 @@ const OnboardingCoaReview = ({ onSetupComplete }) => {
   // ── Deactivate — no confirm dialog ────────────────────────────────────────
   const handleDeactivate = async (node) => {
     if (node.is_system_generated) { alert('System accounts cannot be removed.'); return; }
-    const { data: { user } } = await supabase.auth.getUser();
     const collectIds = (n) => { const ids = [n.account_id]; if (n.children) n.children.forEach(c => ids.push(...collectIds(c))); return ids; };
     const { error } = await supabase.from('accounts').update({ is_active: false }).in('account_id', collectIds(node)).eq('user_id', user.id);
     if (error) { console.error('Deactivate failed:', error); alert('Failed to remove account.'); return; }
@@ -342,7 +341,6 @@ const OnboardingCoaReview = ({ onSetupComplete }) => {
   // ── Toggle LLM ─────────────────────────────────────────────────────────────
   const handleToggleLlm = async (node) => {
     const newVal = !node.include_in_llm;
-    const { data: { user } } = await supabase.auth.getUser();
     const { error } = await supabase.from('accounts').update({ include_in_llm: newVal }).eq('account_id', node.account_id).eq('user_id', user.id);
     if (error) { console.error('Toggle LLM failed:', error); alert('Failed to update AI setting.'); return; }
     setAccounts(prev => prev.map(a => a.account_id === node.account_id ? { ...a, include_in_llm: newVal } : a));
@@ -353,7 +351,6 @@ const OnboardingCoaReview = ({ onSetupComplete }) => {
     setContinueError('');
     setContinuing(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const { data: bankIdents } = await supabase
         .from('account_identifiers')
         .select('identifier_id')

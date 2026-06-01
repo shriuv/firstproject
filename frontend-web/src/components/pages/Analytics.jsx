@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../../shared/supabase';
+import { useUser } from '../../context/UserContext';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import '../../styles/Analytics.css';
@@ -39,6 +40,7 @@ const COGS_KEYWORDS = [
 const Analytics = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const user = useUser();
   const initialTab = new URLSearchParams(location.search).get('tab');
   const [view, setView] = useState(initialTab === 'balance' ? 'balance' : initialTab === 'ledger' ? 'ledger' : 'pl');  // 'pl' | 'balance' | 'ledger'
   // Date Range State
@@ -117,7 +119,6 @@ const Analytics = () => {
 
   useEffect(() => {
     const fetchAccounts = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       const { data } = await supabase
         .from('accounts')
@@ -135,7 +136,6 @@ const Analytics = () => {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         setLoading(false);
         return;

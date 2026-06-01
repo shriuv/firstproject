@@ -5,6 +5,8 @@ import { useAuth } from './shared/hooks/useAuth';
 import { useRole } from './context/RoleContext';
 import { supabase, supabaseConfigError } from './shared/supabase';
 import { ParsingProvider } from './context/ParsingContext';
+import { UserProvider } from './context/UserContext';
+import { DataProvider } from './context/DataContext';
 //chatbot
 import LedgerBuddy from './components/chatbot/LedgerBuddy';
 // Pages & Components
@@ -63,8 +65,8 @@ const ModuleGuard = ({ hasModules, hasIdentifiers, checkSetupStatus, user, toggl
   if (hasIdentifiers === false) {
     return <OnboardingCoaReview onSetupComplete={checkSetupStatus} />;
   }
-  // Fully set up — enter the app
-  return <AppLayout user={user} toggleTheme={toggleTheme} isDarkMode={isDarkMode} />;
+  // Fully set up — enter the app (DataProvider only mounts here, for fully-onboarded users)
+  return <DataProvider><AppLayout user={user} toggleTheme={toggleTheme} isDarkMode={isDarkMode} /></DataProvider>;
 };
 
 // ── 404 Not Found screen ──────────────────────────────────────────────────
@@ -248,6 +250,7 @@ function App() {
   }
 
   return (
+    <UserProvider>
     <ParsingProvider>
       <Routes>
         <Route path="/auth" element={user && (window.location.pathname.startsWith('/auth')) ? <Navigate to={role === 'QC' ? "/qc" : "/"} replace /> : <AuthLayout />}>
@@ -295,6 +298,7 @@ function App() {
         <LedgerBuddy />
       )}
     </ParsingProvider>
+    </UserProvider>
   );
 }
 

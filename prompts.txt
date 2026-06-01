@@ -1,0 +1,9 @@
+Prompt 3 — Paginate transactions
+
+In DataContext.jsx (from the previous fix), change the transactions fetch to paginate. Instead of fetching all rows, fetch the first 100 with .range(0, 99). Add a loadMoreTransactions() function to the context that fetches the next 100 rows (.range(currentCount, currentCount + 99)) and appends them to the existing transactions array. Add a hasMoreTransactions boolean to context, set to false when a fetch returns fewer than 100 rows.
+In Transactions.jsx, add a "Load more" button at the bottom of the transaction list that calls loadMoreTransactions() from context. Only show the button when hasMoreTransactions is true. Show a small spinner on the button while loading.
+Keep the existing filter logic (ALL / PENDING / APPROVED etc.) working on the client-side against whatever rows are currently loaded. If a user is filtering and hits the bottom, the load more button still works — it appends more rows and the filter applies to the expanded set.
+
+Prompt 4 — Parallelise Overview queries
+
+In Overview.jsx, find the fetchData function. It currently makes multiple supabase.from(...) calls sequentially (one awaits before the next starts). Identify all the independent queries — ones that don't depend on the result of a previous query. Wrap them all in a single Promise.all([...]) call so they fire simultaneously and resolve together. Only queries that genuinely depend on a previous result (e.g. need a user_id that comes from auth — but auth is now from context so that's free) should remain sequential. This should reduce Overview load time by the sum of all those query round-trips minus the longest one.

@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../shared/supabase';
+import { useUser } from '../../context/UserContext';
+import { useData } from '../../context/DataContext';
 import AddAccountModal from '../AddAccountModal';
 import '../../styles/Accounts.css';
 import { motion } from 'framer-motion';
@@ -17,6 +19,7 @@ function identifierMode(identifier) {
 }
 
 const EditIdentifierModal = ({ account, onClose, onSuccess }) => {
+  const user = useUser();
   const [identifier, setIdentifier] = useState(null);
   const [form, setForm] = useState({ institution_name: '', account_number_last4: '', ifsc_code: '', card_last4: '', card_network: 'VISA', wallet_id: '' });
   const [loading, setLoading] = useState(true);
@@ -26,7 +29,6 @@ const EditIdentifierModal = ({ account, onClose, onSuccess }) => {
   useEffect(() => {
     const load = async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
         const { data, error } = await supabase
           .from('account_identifiers')
           .select('*')
@@ -61,7 +63,6 @@ const EditIdentifierModal = ({ account, onClose, onSuccess }) => {
     setError('');
     setSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const last4 = mode === 'CREDIT_CARD' ? form.card_last4 : form.account_number_last4;
       if ((mode === 'BANK' || mode === 'CREDIT_CARD') && last4 && last4.length !== 4) {
         setError('Last 4 digits must be exactly 4 characters.');
@@ -422,9 +423,8 @@ const AccountNode = ({ node, onRename, onDeactivate, onEditIdentifier, onToggleL
 // ─────────────────────────────────────────────────────────────────────────────
 const Accounts = () => {
   const navigate = useNavigate();
-  const [accounts, setAccounts] = useState([]);
-  const [identifiers, setIdentifiers] = useState({});
-  const [loading, setLoading] = useState(true);
+  const user = useUser();
+  const { accounts, setAccounts, identifiers, accountsLoading: loading, updateAccount, refreshAccounts } = useData();
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [renamingId, setRenamingId] = useState(null);
   const [renameValue, setRenameValue] = useState('');
@@ -439,37 +439,7 @@ const Accounts = () => {
     { key: 'EXPENSE',   label: 'Expenses' },
   ];
 
-  const fetchAccounts = async () => {
-    setLoading(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
-      const { data: accsData, error: accsErr } = await supabase
-        .from('accounts')
-        .select('account_id, account_name, account_type, balance_nature, parent_account_id, is_active, is_system_generated, include_in_llm')
-        .eq('user_id', user.id);
-      if (accsErr) throw accsErr;
-
-      const { data: identData, error: identErr } = await supabase
-        .from('account_identifiers')
-        .select('*')
-        .eq('user_id', user.id);
-      if (identErr) throw identErr;
-
-      const identMap = {};
-      (identData || []).forEach(ident => { identMap[ident.account_id] = ident; });
-
-      setAccounts(accsData || []);
-      setIdentifiers(identMap);
-    } catch (err) {
-      console.error('Fetch accounts failed:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { fetchAccounts(); }, []);
+  // accounts and identifiers are owned by DataContext; no local fetch needed.
 
   const buildTree = (allAccounts, type) => {
     const typed = allAccounts.filter(acc => acc.account_type === type && acc.is_active);
@@ -485,14 +455,13 @@ const Accounts = () => {
     if (!newName.trim()) return;
     setSavingId(accountId);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const { data: acc } = await supabase.from('accounts').select('is_system_generated').eq('account_id', accountId).single();
       if (acc?.is_system_generated) { alert('System accounts cannot be renamed.'); setSavingId(null); return; }
       const { error } = await supabase.from('accounts').update({ account_name: newName.trim() }).eq('account_id', accountId).eq('user_id', user.id);
       if (error) throw error;
       setRenamingId(null);
       setRenameValue('');
-      await fetchAccounts();
+      updateAccount(accountId, { account_name: newName.trim() });
     } catch (err) {
       console.error('Rename failed:', err);
       alert('Failed to rename account.');
@@ -503,7 +472,6 @@ const Accounts = () => {
 
   const handleDeactivate = async (node) => {
     if (node.is_system_generated) { alert('System accounts cannot be deactivated.'); return; }
-    const { data: { user } } = await supabase.auth.getUser();
     const { count: txnCount } = await supabase
       .from('transactions').select('*', { count: 'exact', head: true })
       .or(`base_account_id.eq.${node.account_id},offset_account_id.eq.${node.account_id}`)
@@ -517,12 +485,12 @@ const Accounts = () => {
     const collectIds = (n) => { const ids = [n.account_id]; if (n.children) n.children.forEach(c => ids.push(...collectIds(c))); return ids; };
     const { error } = await supabase.from('accounts').update({ is_active: false }).in('account_id', collectIds(node)).eq('user_id', user.id);
     if (error) { console.error('Deactivate failed:', error); alert('Failed to deactivate account.'); return; }
-    await fetchAccounts();
+    // Patch all deactivated IDs in context state
+    collectIds(node).forEach(id => updateAccount(id, { is_active: false }));
   };
 
   const handleToggleLlm = async (node) => {
     const newVal = !node.include_in_llm;
-    const { data: { user } } = await supabase.auth.getUser();
     const { error } = await supabase
       .from('accounts')
       .update({ include_in_llm: newVal })
@@ -533,7 +501,7 @@ const Accounts = () => {
       alert('Failed to update AI categorisation setting.');
       return;
     }
-    // Optimistically update local state without full refetch
+    // Optimistically update context state
     setAccounts(prev =>
       prev.map(a => a.account_id === node.account_id ? { ...a, include_in_llm: newVal } : a)
     );
@@ -570,9 +538,9 @@ const Accounts = () => {
       {addModalOpen && (
         <AddAccountModal
           onClose={() => setAddModalOpen(false)}
-          onCreated={(newAccount) => {
+          onCreated={() => {
             setAddModalOpen(false);
-            fetchAccounts();
+            refreshAccounts();
           }}
         />
       )}
@@ -581,7 +549,7 @@ const Accounts = () => {
         <EditIdentifierModal
           account={identifierTarget}
           onClose={() => setIdentifierTarget(null)}
-          onSuccess={() => { setIdentifierTarget(null); fetchAccounts(); }}
+          onSuccess={() => { setIdentifierTarget(null); refreshAccounts(); }}
         />
       )}
 

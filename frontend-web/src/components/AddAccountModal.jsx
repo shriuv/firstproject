@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { supabase } from '../shared/supabase';
+import { useUser } from '../context/UserContext';
 
 const AddAccountModal = ({ onClose, onCreated, defaultValues = {} }) => {
+  const user = useUser();
   const [form, setForm] = useState({
     account_name: '',
     account_type: 'EXPENSE',
@@ -22,7 +24,6 @@ const AddAccountModal = ({ onClose, onCreated, defaultValues = {} }) => {
 
   useEffect(() => {
     const fetchAccounts = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const { data } = await supabase
@@ -88,7 +89,6 @@ const AddAccountModal = ({ onClose, onCreated, defaultValues = {} }) => {
 
     setLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
       // Create account

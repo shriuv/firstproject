@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../shared/supabase';
+import { useUser } from '../context/UserContext';
 import AddAccountModal from './AddAccountModal';
 import '../styles/AccountPickerModal.css';
 
@@ -15,6 +16,7 @@ const AccountPickerModal = ({
   allowedAccountNames = null,
   onAccountCreated
 }) => {
+  const user = useUser();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -41,7 +43,6 @@ const AccountPickerModal = ({
         return;
       }
       try {
-        const { data: { user } } = await supabase.auth.getUser();
         console.log('🔍 Fetching accounts for user:', user?.id);
         if (!user) return;
 
