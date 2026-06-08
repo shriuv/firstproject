@@ -258,36 +258,40 @@ const Overview = () => {
       }
 
       let category = 'Uncategorized';
-      let offsetAccountType = null;
+      let effectiveAccountType = null;
       let isContra = false;
       let isUncatDB = false;
+      let isBase = false;
+
+      const baseAccountType = txn.source_account?.account_type;
 
       if (txn.transactions && txn.transactions.length > 0) {
         const linkedTxn = txn.transactions[0];
         isContra = linkedTxn.is_contra === true;
         isUncatDB = linkedTxn.is_uncategorised === true;
-        if (linkedTxn.accounts) {
+
+        if (baseAccountType === 'EXPENSE' || baseAccountType === 'INCOME') {
+          category = txn.source_account?.account_name || 'Uncategorized';
+          effectiveAccountType = baseAccountType;
+          isBase = true;
+        } else if (linkedTxn.accounts) {
           category = linkedTxn.accounts.account_name;
-          offsetAccountType = linkedTxn.accounts.account_type;
+          effectiveAccountType = linkedTxn.accounts.account_type;
         }
       }
 
       // Skip contra transactions (internal bank-to-bank transfers)
       if (isContra) return;
 
-      // Skip uncategorised transactions:
-      // 1. the database explicitly marked it as uncategorised (is_uncategorised === true)
-      // 2. no linked account at all (offsetAccountType is null)
-      // 3. name fallback safety net — catches generic/catch-all account names
       const catLower = category.toLowerCase().trim();
       const isUncategorised =
         isUncatDB ||
-        offsetAccountType === null ||
-        catLower.includes('uncategor') ||    // "Uncategorized", "Uncategorised"
-        catLower.includes('unclassif') ||    // "Unclassified Expenses/Assets"
-        catLower.includes('suspense') ||     // "Suspense Account"
-        catLower.includes('opening bal') ||  // "Opening Balance"
-        catLower.includes('temp') ||         // "Temporary", "Temp Account"
+        effectiveAccountType === null ||
+        catLower.includes('uncategor') ||
+        catLower.includes('unclassif') ||
+        catLower.includes('suspense') ||
+        catLower.includes('opening bal') ||
+        catLower.includes('temp') ||
         catLower === 'other' ||
         catLower === 'others' ||
         catLower === 'miscellaneous' ||
@@ -295,7 +299,6 @@ const Overview = () => {
         catLower === 'undefined' ||
         catLower === 'unknown' ||
         catLower === 'general' ||
-        // Generic top-level COA grouping nodes — not real offset accounts
         catLower === 'assets' ||
         catLower === 'liabilities' ||
         catLower === 'income' ||
@@ -309,36 +312,33 @@ const Overview = () => {
         catLower === 'non-current liabilities';
       if (isUncategorised) return;
 
-      // Strict COA-based classification — use account_type exactly as defined in Chart of Accounts:
-      //   EXPENSE     → counts as an expense (Rent, Food, Travel, etc.)
-      //   INCOME      → counts as income (Salary received, Revenue, etc.)
-      //   ASSET       → asset increase = debit on asset account
-      //   LIABILITY   → liability increase = credit on liability account
-      //   EQUITY / anything else → skip entirely
+      if (effectiveAccountType === 'EXPENSE') {
+        const expenseAmt = isBase ? debit : credit;
+        const reversalAmt = isBase ? credit : debit;
 
-      if (offsetAccountType === 'EXPENSE') {
-        if (debit > 0) {
-          totalExpense += debit;
-          monthlyData[timeKey].expense += debit;
+        if (expenseAmt > 0) {
+          totalExpense += expenseAmt;
+          monthlyData[timeKey].expense += expenseAmt;
           if (!expenseMap[category]) expenseMap[category] = { amount: 0, txns: [] };
-          expenseMap[category].amount += debit;
-          expenseMap[category].txns.push(txn);
-          categorisedTxns.push(txn);
-        } else if (credit > 0) {
-          // Credit on an EXPENSE account = expense reversal
-          monthlyData[timeKey].expense = Math.max(0, monthlyData[timeKey].expense - credit);
+          expenseMap[category].amount += expenseAmt;
+          expenseMap[category].txns.push({ ...txn, _isExpense: true, _amt: expenseAmt });
+          categorisedTxns.push({ ...txn, _isExpense: true, _amt: expenseAmt, _cat: category });
+        } else if (reversalAmt > 0) {
+          monthlyData[timeKey].expense = Math.max(0, monthlyData[timeKey].expense - reversalAmt);
         }
-      } else if (offsetAccountType === 'INCOME') {
-        if (credit > 0) {
-          totalIncome += credit;
-          monthlyData[timeKey].income += credit;
+      } else if (effectiveAccountType === 'INCOME') {
+        const incomeAmt = isBase ? credit : debit;
+        const reversalAmt = isBase ? debit : credit;
+
+        if (incomeAmt > 0) {
+          totalIncome += incomeAmt;
+          monthlyData[timeKey].income += incomeAmt;
           if (!incomeMap[category]) incomeMap[category] = { amount: 0, txns: [] };
-          incomeMap[category].amount += credit;
-          incomeMap[category].txns.push(txn);
-          categorisedTxns.push(txn);
-        } else if (debit > 0) {
-          // Debit on an INCOME account = income reversal
-          monthlyData[timeKey].income = Math.max(0, monthlyData[timeKey].income - debit);
+          incomeMap[category].amount += incomeAmt;
+          incomeMap[category].txns.push({ ...txn, _isExpense: false, _amt: incomeAmt });
+          categorisedTxns.push({ ...txn, _isExpense: false, _amt: incomeAmt, _cat: category });
+        } else if (reversalAmt > 0) {
+          monthlyData[timeKey].income = Math.max(0, monthlyData[timeKey].income - reversalAmt);
         }
       }
       // EQUITY, ASSETS, LIABILITIES — skip from P&L widgets
@@ -363,12 +363,12 @@ const Overview = () => {
     }
 
     // Extract all valid, categorised expense transactions from the expenseMap
-    const validExpenseTxns = Object.values(expenseMap).flatMap(cat => cat.txns).sort((a, b) => b.debit - a.debit);
+    const validExpenseTxns = Object.values(expenseMap).flatMap(cat => cat.txns).sort((a, b) => b._amt - a._amt);
     if (validExpenseTxns.length > 0) {
       const largest = validExpenseTxns[0];
       const avg = totalExpense / validExpenseTxns.length;
-      if (largest.debit > avg * 3 && largest.debit > 10000) {
-        const formattedAmt = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(largest.debit);
+      if (largest._amt > avg * 3 && largest._amt > 10000) {
+        const formattedAmt = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(largest._amt);
         insights.push({
           type: 'warning',
           text: `Large unusual transaction detected: ${formattedAmt} for '${largest.details}'.`,
@@ -761,8 +761,8 @@ const Overview = () => {
           </thead>
           <tbody>
             {recentTxns.map(txn => {
-              const isDebit = txn.debit > 0;
-              const amt = isDebit ? txn.debit : txn.credit;
+              const isExpense = txn._isExpense === true;
+              const amt = txn._amt || 0;
 
               let category = txn._cat || 'Uncategorized';
               if (!txn._cat && txn.transactions && txn.transactions.length > 0 && txn.transactions[0].accounts) {
@@ -772,7 +772,7 @@ const Overview = () => {
                 else if (txn.details.toLowerCase().includes('rent')) category = 'Rent';
               }
 
-              const sign = isDebit ? '-' : '+';
+              const sign = isExpense ? '-' : '+';
               const displayDate = formatDate(txn.txn_date);
 
               return (
@@ -780,7 +780,7 @@ const Overview = () => {
                   <td>{displayDate}</td>
                   <td className="txn-details">{txn.details}</td>
                   <td><span className="txn-category">{category}</span></td>
-                  <td className={`txn-amount ${isDebit ? 'negative' : 'positive'}`}>
+                  <td className={`txn-amount ${isExpense ? 'negative' : 'positive'}`}>
                     {sign}{formatCurrency(amt)}
                   </td>
                 </tr>

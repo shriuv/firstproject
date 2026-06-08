@@ -29,7 +29,7 @@ const TRANSACTIONS_SELECT = `
   document_id,
   account_id,
   group_id,
-  source_account:account_id ( account_id, account_name ),
+  source_account:account_id ( account_id, account_name, account_type ),
   source_document:document_id ( document_id, file_name ),
   transactions!uncategorized_transaction_id (
     transaction_id,
@@ -99,7 +99,7 @@ export function DataProvider({ children }) {
         .range(currentCount, currentCount + 99);
 
       if (error) throw error;
-      
+
       setTransactions(prev => [...prev, ...(data || [])]);
       setHasMoreTransactions((data || []).length === 100);
     } catch (err) {

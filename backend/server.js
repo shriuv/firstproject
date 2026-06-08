@@ -8,12 +8,13 @@ const transactionRoutes = require('./routes/transactionRoutes');
 const qcRoutes = require('./routes/qcRoutes');
 const chatRoutes = require('./routes/chatRoutes');
 const rulesEngineService = require('./services/rulesEngineService');
+const zohoRoutes = require('./routes/zohoRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// � SECURITY: CORS Restriction
+// 🔒 SECURITY: CORS Restriction
 // ==========================================
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',').map(o => o.trim());
 logger.info('CORS allowed origins', { origins: ALLOWED_ORIGINS });
@@ -41,7 +42,7 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json()); // Essential for parsing JSON batches
+app.use(express.json());
 app.set('trust proxy', 1);
 
 // ==========================================
@@ -59,6 +60,7 @@ app.use('/api/transactions', transactionRoutes);
 app.use('/api/qc', qcRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/zoho', zohoRoutes);
 
 // ==========================================
 // 🔒 INTERNAL: Auto-Pipeline (Python → Node)
@@ -68,16 +70,8 @@ app.use('/api/chatbot', chatbotRoutes);
 const { runAutoPipeline } = require('./controllers/autoPipelineController');
 app.post('/internal/auto-pipeline', express.json(), runAutoPipeline);
 
-
-// ==========================================
-// 🧪 HEALTH CHECK / QC
-// ==========================================
 // ==========================================
 // 🏓 KEEP-ALIVE PING
-// Called by:
-//   1. Frontend heartbeat (useHeartbeat hook) — every 5 min when user is active.
-//   2. parser_backend self-keep-alive — every 10 min while processing a document.
-// Returns a minimal 200 so Render resets its 15-min inactivity timer.
 // ==========================================
 app.get('/ping', (req, res) => {
   res.status(200).json({ pong: true });
@@ -108,6 +102,7 @@ app.use((err, req, res, next) => {
       : err.message
   });
 });
+
 // Load rules at startup
 rulesEngineService.loadRules().then(() => {
   app.listen(PORT, () => {
