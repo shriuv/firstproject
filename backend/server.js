@@ -105,10 +105,13 @@ app.use((err, req, res, next) => {
 
 // Load rules at startup
 rulesEngineService.loadRules().then(() => {
-  app.listen(PORT, () => {
-    logger.info(`LedgerAI Backend running on port ${PORT}`, { port: PORT, env: process.env.NODE_ENV || 'development' });
-  });
+  if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+    app.listen(PORT, () => {
+      logger.info(`LedgerAI Backend running on port ${PORT}`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+    });
+  }
 }).catch((err) => {
   logger.error('Failed to load rules at startup', { error: err.message, stack: err.stack });
-  process.exit(1);
 });
+
+module.exports = app;
