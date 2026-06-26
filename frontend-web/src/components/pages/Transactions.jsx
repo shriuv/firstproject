@@ -348,6 +348,11 @@ const Transactions = () => {
     setDateRange({ start, end });
   };
 
+  // Refresh transactions on mount to ensure we always have the latest data
+  useEffect(() => {
+    refreshTransactions();
+  }, [refreshTransactions]);
+
   // ── Pipeline-status seeding (re-runs when context transactions load fresh) ──
   useEffect(() => {
     if (loading || transactions.length === 0) return;

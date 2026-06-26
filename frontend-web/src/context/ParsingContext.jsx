@@ -232,7 +232,7 @@ const NotificationPortal = ({ notification, onClose }) => {
 
     const handleAction = () => {
         if (notification.type === 'success' && notification.docId) {
-            navigate(`/review/${notification.docId}`);
+            navigate(`/review?id=${notification.docId}`);
         }
         onClose();
     };

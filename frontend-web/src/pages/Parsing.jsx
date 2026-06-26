@@ -9,7 +9,9 @@ import API from "../api/api";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useParsing, extractionSteps } from "../context/ParsingContext";
 import { formatDate } from "../utils/dateUtils";
+import { useData } from "../context/DataContext";
 import '../styles/Overview.css';
+
 
 // ── Circular Processing Indicator ────────────────────────────────────────────
 const STAGE_META = {
@@ -106,6 +108,7 @@ export default function ParsingPage() {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
     const { activeDoc, isExtracting, startExtraction, clearActiveDoc, maxStepReached } = useParsing();
+    const { refreshTransactions } = useData();
 
     const [file, setFile] = useState(null);
     const [password, setPassword] = useState("");
@@ -210,11 +213,13 @@ export default function ParsingPage() {
             const statsRes = await API.get("/documents/stats");
             setStats(statsRes.data);
             setDeleteTarget(null);
+            refreshTransactions();
         } catch (err) {
             console.error("Delete failed", err);
             if (err.response?.status === 404) {
                 setRecentDocs(prev => prev.filter(d => d.document_id !== id));
                 setDeleteTarget(null);
+                refreshTransactions();
             } else {
                 alert("Failed to delete document: " + (err.response?.data?.detail || err.message));
                 setDeleteTarget(null);

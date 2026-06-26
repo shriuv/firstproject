@@ -7,6 +7,7 @@ import API from "../api/api";
 import { useParsing } from "../context/ParsingContext";
 import PDFViewer from "../components/PDFViewer";
 import { Toast, useToast } from "../components/Toast";
+import { useData } from "../context/DataContext";
 
 // Syntax highlighting helper for JSON
 const syntaxHighlight = (json) => {
@@ -146,6 +147,7 @@ export default function ReviewPage() {
     const documentId = searchParams.get("id");
     const navigate = useNavigate();
     const { retryExtraction } = useParsing();
+    const { refreshTransactions } = useData();
 
     const [data, setData] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
@@ -347,6 +349,7 @@ export default function ReviewPage() {
             setIsApproved(true);
             setData(prev => prev ? { ...prev, status: "APPROVE" } : prev);
             showToast(`${selectedTxns.length} transactions approved successfully!`, "success");
+            refreshTransactions();
         } catch (err) {
             console.error(err);
             showToast("Approval failed: " + (err.response?.data?.detail || err.message), "error");

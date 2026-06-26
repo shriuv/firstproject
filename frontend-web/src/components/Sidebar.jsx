@@ -47,7 +47,8 @@ const Sidebar = ({
   ];
 
   // Show "Review" only if there is a document in context
-  const currentDocId = latestFinishedDocId || activeDoc?.id;
+  const urlDocId = new URLSearchParams(location.search).get('id');
+  const currentDocId = latestFinishedDocId || activeDoc?.id || urlDocId;
   if (currentDocId) {
     menuItems.push({ 
         path: `/review?id=${currentDocId}`, 
