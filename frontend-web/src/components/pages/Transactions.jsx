@@ -194,7 +194,7 @@ const Transactions = () => {
   const user = useUser();
   const { transactions, setTransactions, transactionsLoading: loading,
           refreshTransactions, accounts: contextAccounts, refreshAccounts,
-          hasMoreTransactions, loadMoreTransactions } = useData();
+          hasMoreTransactions, loadMoreTransactions, documents } = useData();
   const [isMoreLoading, setIsMoreLoading] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const { toasts, showToast } = useToast();
@@ -453,12 +453,10 @@ const Transactions = () => {
   }, [transactions]);
 
   const filterDocuments = React.useMemo(() => {
-    const docMap = {};
-    transactions.forEach(t => {
-      if (t.source_document) docMap[t.source_document.document_id] = t.source_document;
-    });
-    return Object.values(docMap);
-  }, [transactions]);
+    if (!documents || documents.length === 0) return [];
+    const docIds = new Set(transactions.map(t => t.document_id).filter(Boolean));
+    return documents.filter(d => docIds.has(d.document_id));
+  }, [transactions, documents]);
 
   const cachedAccounts = React.useMemo(() => {
     return contextAccounts

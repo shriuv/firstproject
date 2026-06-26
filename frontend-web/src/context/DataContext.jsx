@@ -29,8 +29,7 @@ const TRANSACTIONS_SELECT = `
   document_id,
   account_id,
   group_id,
-  source_account:account_id ( account_id, account_name, account_type ),
-  source_document:document_id ( document_id, file_name ),
+  source_account:accounts ( account_id, account_name, account_type ),
   transactions!uncategorized_transaction_id (
     transaction_id,
     review_status,
@@ -65,7 +64,23 @@ export function DataProvider({ children }) {
   const [identifiers, setIdentifiers] = useState({}); // keyed by account_id
   const [accountsLoading, setAccountsLoading] = useState(true);
 
+  // ── Documents state ──────────────────────────────────────────────────────
+  const [documents, setDocuments] = useState([]);
+
   // ── Fetch functions ──────────────────────────────────────────────────────
+  const fetchDocuments = useCallback(async () => {
+    if (!user) return;
+    try {
+      const { data, error } = await supabase
+        .from('documents')
+        .select('document_id, file_name')
+        .eq('user_id', user.id);
+      if (error) throw error;
+      setDocuments(data || []);
+    } catch (err) {
+      console.error('[DataContext] fetchDocuments failed:', err);
+    }
+  }, [user]);
   const fetchTransactions = useCallback(async () => {
     if (!user) return;
     setTransactionsLoading(true);
@@ -133,12 +148,13 @@ export function DataProvider({ children }) {
     }
   }, [user]);
 
-  // Mount: fetch both once user is available
+  // Mount: fetch all once user is available
   useEffect(() => {
     if (!user) return;
     fetchTransactions();
     fetchAccounts();
-  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchDocuments();
+  }, [user, fetchTransactions, fetchAccounts, fetchDocuments]);
 
   // ── Optimistic updaters ──────────────────────────────────────────────────
 
@@ -166,7 +182,10 @@ export function DataProvider({ children }) {
   // ── Public refresh helpers ───────────────────────────────────────────────
 
   /** Full re-fetch of transactions (e.g. after pipeline completes, manual-add). */
-  const refreshTransactions = useCallback(() => fetchTransactions(), [fetchTransactions]);
+  const refreshTransactions = useCallback(() => {
+    fetchTransactions();
+    fetchDocuments();
+  }, [fetchTransactions, fetchDocuments]);
 
   /** Full re-fetch of accounts + identifiers (e.g. after AddAccountModal, EditIdentifier). */
   const refreshAccounts = useCallback(() => fetchAccounts(), [fetchAccounts]);
@@ -181,6 +200,7 @@ export function DataProvider({ children }) {
     updateTransaction,
     hasMoreTransactions,
     loadMoreTransactions,
+    documents,
 
     // Accounts
     accounts,
