@@ -51,7 +51,7 @@ def get_client() -> Client:
             raise RuntimeError(
                 "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env"
             )
-        options = ClientOptions(http_client=httpx.Client(http2=False))
+        options = ClientOptions(httpx_client=httpx.Client(http2=False))
         _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=options)
         logger.info("Supabase service-role client initialised.")
     return _client
@@ -67,7 +67,7 @@ def make_client() -> Client:
         raise RuntimeError(
             "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env"
         )
-    options = ClientOptions(http_client=httpx.Client(http2=False))
+    options = ClientOptions(httpx_client=httpx.Client(http2=False))
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=options)
 
 

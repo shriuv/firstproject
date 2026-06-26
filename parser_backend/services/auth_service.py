@@ -15,7 +15,7 @@ def _get_auth_client():
     """Auth operations use the ANON_KEY (public client)."""
     from supabase import create_client, ClientOptions
     import httpx
-    options = ClientOptions(http_client=httpx.Client(http2=False))
+    options = ClientOptions(httpx_client=httpx.Client(http2=False))
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY, options=options)
 
 

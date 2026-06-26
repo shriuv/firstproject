@@ -29,7 +29,7 @@ def _get_anon_client():
     """Public client — used for sign_up / sign_in_with_password."""
     from supabase import create_client, ClientOptions
     import httpx
-    options = ClientOptions(http_client=httpx.Client(http2=False))
+    options = ClientOptions(httpx_client=httpx.Client(http2=False))
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY, options=options)
 
 
@@ -37,7 +37,7 @@ def _get_service_client():
     """Service-role client — used for admin auth operations (get_user)."""
     from supabase import create_client, ClientOptions
     import httpx
-    options = ClientOptions(http_client=httpx.Client(http2=False))
+    options = ClientOptions(httpx_client=httpx.Client(http2=False))
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=options)
 
 
