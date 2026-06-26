@@ -7,7 +7,8 @@ Uses SUPABASE_SERVICE_ROLE_KEY so all server-side operations
 bypass Row Level Security (RLS) — correct for backend services.
 """
 
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
+import httpx
 import threading
 import logging
 import sys, os
@@ -50,7 +51,8 @@ def get_client() -> Client:
             raise RuntimeError(
                 "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env"
             )
-        _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        options = ClientOptions(http_client=httpx.Client(http2=False))
+        _client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=options)
         logger.info("Supabase service-role client initialised.")
     return _client
 
@@ -65,7 +67,8 @@ def make_client() -> Client:
         raise RuntimeError(
             "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env"
         )
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    options = ClientOptions(http_client=httpx.Client(http2=False))
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=options)
 
 
 def set_thread_client(client: Client) -> None:
