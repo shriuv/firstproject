@@ -3,6 +3,54 @@ require('dotenv').config();
 
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || `http://127.0.0.1:${process.env.PYTHON_PORT || 8000}`;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global rule-table cache
+// ─────────────────────────────────────────────────────────────────────────────
+// global_keyword_rules and global_vector_cache are GLOBAL (not per-user) and
+// change rarely, but findVectorMatch / findVectorMatchWithEmbedding used to
+// re-fetch them on EVERY call — i.e. once per transaction. For an 85-row
+// statement (~40 unique merchants) that's ~40 redundant Supabase round-trips of
+// the exact same data, easily 8–10s of wasted wall-clock against a serverless
+// timeout. Cache at module scope (persists across requests on a warm Vercel
+// instance, resets naturally on cold start) with a short TTL so QC edits still
+// propagate. On a fetch error we serve the last good snapshot instead of
+// dropping every rule.
+const RULE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+let _kwRules = null, _kwRulesAt = 0;
+let _gvCache = null, _gvCacheAt = 0;
+
+async function getKeywordRules() {
+  if (_kwRules && (Date.now() - _kwRulesAt) < RULE_CACHE_TTL_MS) return _kwRules;
+  const { data, error } = await supabase
+    .from('global_keyword_rules')
+    .select('keyword, match_type, target_template_id, priority')
+    .eq('is_active', true)
+    .order('priority', { ascending: false });
+  if (error) {
+    console.error('❌ Failed to load global_keyword_rules:', error.message);
+    return _kwRules || [];
+  }
+  _kwRules = data || [];
+  _kwRulesAt = Date.now();
+  return _kwRules;
+}
+
+async function getGlobalVectorCache() {
+  if (_gvCache && (Date.now() - _gvCacheAt) < RULE_CACHE_TTL_MS) return _gvCache;
+  const { data, error } = await supabase
+    .from('global_vector_cache')
+    .select('clean_name, target_template_id, is_semantic_anchor')
+    .eq('is_verified', true);
+  if (error) {
+    console.error('❌ Failed to load global_vector_cache:', error.message);
+    return _gvCache || [];
+  }
+  _gvCache = data || [];
+  _gvCacheAt = Date.now();
+  return _gvCache;
+}
+
 /**
  * Handles the AI similarity matching for cleaned merchant strings.
  * Waterfall: Personal Vector (3.1) → Global Keyword Rules (3.1.5) → Global Vector (3.2)
@@ -34,40 +82,48 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     const looksLikePersonName = !isMeaningfulString;
 
     // 1. Embedding Generation (Python ML Microservice)
-    const response = await fetch(`${ML_SERVICE_URL}/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: uppercaseString })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Embedding generation failed with status: ${response.status}`);
-    }
-
-    const { embedding } = await response.json();
-    if (!embedding || !Array.isArray(embedding)) {
-      throw new Error('Failed to retrieve 384-dimensional array embedding');
+    // NON-FATAL: keyword rules (G_KEY) below need no embedding, so a sleeping /
+    // unreachable embed service (e.g. HuggingFace free tier cold start) must NOT
+    // block deterministic keyword matching. We capture the embedding if we can
+    // and fall through to keyword matching either way.
+    let embedding = null;
+    try {
+      const response = await fetch(`${ML_SERVICE_URL}/embed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: uppercaseString })
+      });
+      if (response.ok) {
+        const json = await response.json();
+        if (json.embedding && Array.isArray(json.embedding)) embedding = json.embedding;
+      } else {
+        console.warn(`⚠️ Embed service returned ${response.status} — continuing with keyword-only matching`);
+      }
+    } catch (embedErr) {
+      console.warn(`⚠️ Embed service unreachable (${embedErr.message}) — continuing with keyword-only matching`);
     }
 
     // ------------------------------------------
     // 🛡️ STAGE 3.1: PERSONAL VECTOR CACHE
     // ------------------------------------------
-    // User's own history always takes highest priority.
-    const { data: pData, error: pError } = await supabase.rpc('match_personal_vectors', {
-      p_user_id: userId,
-      query_embedding: embedding,
-      match_threshold: 0.35,
-      match_count: 1
-    });
+    // User's own history always takes highest priority. Requires an embedding.
+    if (embedding) {
+      const { data: pData, error: pError } = await supabase.rpc('match_personal_vectors', {
+        p_user_id: userId,
+        query_embedding: embedding,
+        match_threshold: 0.35,
+        match_count: 1
+      });
 
-    if (pError) {
-      console.error('❌ findVectorMatch (Personal) rpc error:', pError);
-    } else if (pData && pData.length > 0) {
-      return {
-        offset_account_id: pData[0].account_id,
-        confidence_score: 1.00,
-        categorised_by: 'P_VEC'
-      };
+      if (pError) {
+        console.error('❌ findVectorMatch (Personal) rpc error:', pError);
+      } else if (pData && pData.length > 0) {
+        return {
+          offset_account_id: pData[0].account_id,
+          confidence_score: 1.00,
+          categorised_by: 'P_VEC'
+        };
+      }
     }
 
     // ------------------------------------------
@@ -75,11 +131,7 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // ------------------------------------------
     // Highest priority for global rules. This ensures specific keywords 
     // (like GST or GOOGLEWORKSP) always win before fuzzy or cache matches.
-    const { data: keywordRules, error: keywordError } = await supabase
-      .from('global_keyword_rules')
-      .select('keyword, match_type, target_template_id, priority')
-      .eq('is_active', true)
-      .order('priority', { ascending: false });
+    const keywordRules = await getKeywordRules();
 
     if (keywordRules && keywordRules.length > 0) {
       console.debug(`🔍 G_KEY: Evaluating ${keywordRules.length} rules against "${uppercaseString}"`);
@@ -115,10 +167,7 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // ⚡ STAGE 3.1.2: TRIPLE-THREAT (Literal Only)
     // ------------------------------------------
     // High-priority exact matches from the global cache.
-    const { data: globalCache } = await supabase
-      .from('global_vector_cache')
-      .select('clean_name, target_template_id, is_semantic_anchor')
-      .eq('is_verified', true);
+    const globalCache = await getGlobalVectorCache();
 
     if (globalCache) {
       for (const entry of globalCache) {
@@ -180,9 +229,11 @@ async function findVectorMatch(cleanString, userId, transactionType) {
     // 🌐 STAGE 3.2: GLOBAL VECTOR CACHE Fallback
     // ------------------------------------------
     // Last resort: fuzzy semantic similarity against the global curated vector library.
+    // Requires an embedding — if the embed service was unreachable, skip straight
+    // to returning null (keyword stages above already had their chance).
     // SKIP entirely if the string looks like a person name — vectors will match garbage at low threshold.
-    if (looksLikePersonName) {
-      console.debug(`🚫 G_VEC skipped: "${uppercaseString}" looks like a person name.`);
+    if (!embedding || looksLikePersonName) {
+      if (looksLikePersonName) console.debug(`🚫 G_VEC skipped: "${uppercaseString}" looks like a person name.`);
       return null;
     }
 
@@ -273,11 +324,7 @@ async function findVectorMatchWithEmbedding(embedding, userId, balanceNature, cl
         !uppercaseCleanName.includes(' ') &&
         uppercaseCleanName.length > 12
       );
-      const { data: keywordRules } = await supabase
-        .from('global_keyword_rules')
-        .select('keyword, match_type, target_template_id, priority')
-        .eq('is_active', true)
-        .order('priority', { ascending: false });
+      const keywordRules = await getKeywordRules();
 
       if (keywordRules && keywordRules.length > 0) {
         for (const rule of keywordRules) {

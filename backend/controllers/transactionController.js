@@ -1654,20 +1654,29 @@ async function retryPipeline(req, res) {
       .eq('document_id', document_id)
       .eq('status', 'pending');
 
-    // 4. Re-trigger the auto-pipeline (fire-and-forget — same pattern as Python grouping job)
-    const internalUrl = `http://localhost:${process.env.PORT || 3000}/internal/auto-pipeline`;
-    fetch(internalUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.INTERNAL_SECRET}`,
-      },
-      body: JSON.stringify({ document_id, user_id: userId }),
-    }).catch(err =>
-      console.error('[RETRY-PIPELINE] Failed to trigger internal endpoint:', err.message)
-    );
+    // 4. Re-trigger the auto-pipeline IN-PROCESS.
+    //    A localhost HTTP self-call (http://localhost:PORT/internal/auto-pipeline)
+    //    does NOT work on serverless (Vercel): there is no persistent port to call,
+    //    and any fire-and-forget work is frozen the instant the response is sent.
+    //    So we invoke the handler directly with a synthetic req/mock res and AWAIT
+    //    it, guaranteeing the pipeline finishes within this invocation.
+    //    (Same in-process pattern bulkController already uses.)
+    try {
+      const { runAutoPipeline } = require('./autoPipelineController');
+      await runAutoPipeline(
+        {
+          headers: { authorization: `Bearer ${process.env.INTERNAL_SECRET}` },
+          body: { document_id, user_id: userId },
+        },
+        { json: () => {}, status: () => ({ json: () => {} }) }
+      );
+    } catch (err) {
+      console.error('[RETRY-PIPELINE] In-process auto-pipeline failed:', err.message);
+      // Pipeline failure is non-fatal to the retry request itself — the document
+      // status reflects the outcome and the user can retry again.
+    }
 
-    return res.json({ success: true, message: 'Pipeline retriggered' });
+    return res.json({ success: true, message: 'Pipeline complete' });
   } catch (err) {
     console.error('Unexpected error in retryPipeline:', err);
     return res.status(500).json({ error: 'Internal server error.' });
